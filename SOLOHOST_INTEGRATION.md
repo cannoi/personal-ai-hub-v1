@@ -1,25 +1,18 @@
 # SoloHost AI Gateway
 
-## For App Builder / Custom Provider
+## App Builder / Custom Provider
 
 | Field | Value |
 |-------|--------|
-| Provider type | OpenAI-compatible / Custom |
+| Type | OpenAI-compatible / Custom |
 | Base URL | `http://personal-ai-hub:8080/v1` |
-| API Key | `pah_…` from Hub → Gateway tokens |
+| API Key | `pah_…` (Hub → Gateway tokens) |
 | Model | `auto` |
 
-Alternative (host bridge): `http://172.17.0.1:18080/v1`
+```bash
+curl -s http://personal-ai-hub:8080/v1/models   -H "Authorization: Bearer pah_YOUR_TOKEN"
 
-Native Hub API (unchanged): `POST http://personal-ai-hub:8080/api/v1/chat`
-
-## Auth
-
-```
-Authorization: Bearer pah_…
-# or
-X-Personal-AI-Key: pah_…
-X-SoloHost-App-ID: app-builder
+curl -s http://personal-ai-hub:8080/v1/chat/completions   -H "Content-Type: application/json"   -H "Authorization: Bearer pah_YOUR_TOKEN"   -H "X-SoloHost-App-ID: app-builder"   -d '{"model":"auto","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-Provider cloud keys never leave the Hub vault.
+Native API still available: `POST /api/v1/chat`

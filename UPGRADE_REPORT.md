@@ -1,68 +1,55 @@
-# Personal AI Hub — Recovery & Hub Upgrade Report
+# UPGRADE REPORT — v1.6.2 OpenAI-compatible routes
 
-## Primary incident fixed
-Observed production symptom:
-- `token.added` was logged, but chat immediately returned `NO_ACTIVE_KEY`.
-- This happened because key activation depended on a frontend follow-up test. If that UI step was skipped, interrupted, or an older frontend was running, the key remained `TEST_REQUIRED` and the server refused to use it.
+## Root cause
+`openai-compat.js` existed and gateway docs advertised `/v1/*`, but earlier builds either:
+1. never called `mountOpenAICompat(app, …)`, or
+2. deployed an older image without the mount.
 
-### Fix
-1. Provider keys are now verified server-side immediately after creation.
-2. Chat automatically attempts bounded verification of pending/temporary keys before returning `NO_ACTIVE_KEY`.
-3. Existing `TEST_REQUIRED` keys from older state files can therefore recover without re-entering the token.
-4. Invalid/auth-failed keys remain blocked until explicitly re-tested/replaced.
+Result: `GET /v1/models` and `POST /v1/chat/completions` hit the JSON catch-all → **404**.
 
-## Multi-provider / multi-token
-- Multiple encrypted tokens per provider are supported.
-- Every token stores an immutable provider ID.
-- Routing only selects tokens belonging to the requested provider.
-- Key selection prefers the least-used eligible token and respects cooldowns.
-- Authentication errors become `INVALID`; rate limits become `COOLDOWN`; transient errors become `ERROR` with bounded retry delay.
+## Fix (surgical)
+| File | Change |
+|------|--------|
+| `index.js` | Calls `mountOpenAICompat(app, { kernel: ai, serviceName })` **before** `/v1` catch-all; logs routes at boot; `GET /version` |
+| `openai-compat.js` | Explicit `app.get/post` for `/v1/models`, `/v1/chat/completions`, `/v1/health`, `/v1/__ping` (+ `/openai/v1/*` aliases) |
+| `test.js` | Real HTTP integration tests (status + JSON), not source-grep |
+
+## Auth
+- No gateway tokens yet → open (bootstrap)
+- Tokens exist → require `Authorization: Bearer pah_…` or `X-Personal-AI-Key`
+- Invalid/missing → 401 JSON
 
 ## Model discovery
-- Models are discovered through the provider associated with each token.
-- Gemini discovery filters to models advertising `generateContent`.
-- OpenAI-compatible discovery removes obvious non-chat model families such as embeddings, moderation, TTS, image and transcription models.
-- Chat model selection is derived from active token/provider capability rather than one global hard-coded list.
+`GET /v1/models` returns `auto` + live Ollama models + usable cloud key models.
 
-## Logging / diagnostics
-Settings contains Activity Log with:
-- AI requests and request IDs
-- token add/verify lifecycle
-- provider/model attempts
-- fallback/failure reasons
-- local AI health/download events
-- memory events
-- API errors
+## Smart routing
+`model=auto` → existing `kernel.chat` / routing modes. No second router.
 
-Logs auto-refresh while Settings is open. Secret fields are redacted, while non-secret `keyId` values remain visible for troubleshooting.
+## Tests
+```
+node test.js → ALL TESTS PASSED
+```
+Includes: /v1/__ping, /v1/health, /v1/models (auto + local), chat completions, stream reject, token auth, legacy kernel.chat.
 
-## SoloHost AI Gateway
-The same unified execution plane is exposed through:
-- `/ai/*` for Hub UI/internal control
-- `/api/v1/*` for SoloHost app integrations
+## Deploy verification
+After rebuild, from App Builder container:
+```
+wget -qO- http://personal-ai-hub:8080/version
+wget -qO- http://personal-ai-hub:8080/v1/__ping
+wget -qO- http://personal-ai-hub:8080/v1/models --header="Authorization: Bearer pah_…"
+```
+If `/version` is missing, the running image is **not** 1.6.2.
 
-`X-SoloHost-App-ID` is captured as diagnostic context without exposing credentials.
+## App Builder
+```
+Base URL: http://personal-ai-hub:8080/v1
+API Key:  pah_…
+Model:    auto
+```
 
-## Local AI
-- Ollama is treated as a provider capability rather than a cloud credential.
-- A virtual local key is created automatically and can be health-checked.
-- Ollama base URL can be configured with `OLLAMA_BASE_URL` or `OLLAMA_HOST`; otherwise it defaults to `http://127.0.0.1:11434`.
-- Model list/pull/chat use the same unified kernel path.
+## Unchanged
+POST /api/v1/chat, vault, providers, Ollama, UI shell, no docker.sock, no :11434 public.
 
-## Security
-- Provider credentials remain AES-256-GCM encrypted.
-- Generated master key is runtime state and is no longer shipped in the release ZIP.
-- Runtime data is ignored by `.gitignore`.
-- Logs do not redact ordinary diagnostic IDs such as `keyId`, but redact credential/token/authorization/secret/password fields.
-
-## Verification
-- All repository JavaScript files: syntax PASS.
-- All inline frontend JavaScript blocks: syntax PASS.
-- `npm test`: PASS — core integration + pending-key recovery.
-- Secret scan: PASS for common API-key patterns in shipped source.
-- Release archive integrity: verified with `unzip -t`.
-
-## Not fully verifiable in build environment
-Live cloud-provider execution with the user's real credentials cannot be certified without those credentials and network access to the provider. The integration suite uses deterministic provider responses to verify the complete encrypted-token → provider → model → response pipeline.
-
-Local Ollama execution also depends on an Ollama service reachable from the SoloHost container. A `fetch failed` local health event is therefore a real infrastructure/network state, not silently treated as a healthy model runtime.
+## Limitations
+- stream=true not supported
+- usage tokens reported as 0

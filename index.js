@@ -111,6 +111,10 @@ ai.mount(app, '/ai');
 // Shared AI API for every SoloHost app (same execution plane)
 ai.mount(app, '/api/v1');
 
+// OpenAI-compatible Universal Provider — MUST be registered before /v1 JSON 404 catch-all
+mountOpenAICompat(app, { kernel: ai, serviceName: SERVICE_NAME });
+
+
 function buildConnectionHints(req) {
   const host = req.get('host') || `${SERVICE_NAME}:${PORT}`;
   const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
@@ -126,6 +130,15 @@ function buildConnectionHints(req) {
   }
   return [...new Set(bases.filter(Boolean))];
 }
+
+app.get('/version', (_req, res) => {
+  res.json({
+    name: 'personal-ai-hub',
+    version: '1.6.2',
+    openaiCompatible: true,
+    routes: ['GET /v1/models', 'POST /v1/chat/completions', 'GET /v1/health', 'GET /v1/__ping']
+  });
+});
 
 app.get('/health', async (_req, res) => {
   try {
@@ -267,6 +280,7 @@ ensureOllama()
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Personal AI Hub listening on 0.0.0.0:${PORT}`);
+  console.log('OpenAI routes: GET /v1/models, POST /v1/chat/completions, GET /v1/health, GET /v1/__ping');
   console.log(`Service DNS name: ${SERVICE_NAME}`);
   console.log(`Gateway discovery: http://${SERVICE_NAME}:${PORT}/api/v1/gateway`);
   if (PUBLIC_BASE_URL) console.log(`Public base URL: ${PUBLIC_BASE_URL}`);
