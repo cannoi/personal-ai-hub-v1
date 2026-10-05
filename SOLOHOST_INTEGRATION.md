@@ -1,19 +1,25 @@
-# SoloHost — Personal AI Hub
+# SoloHost AI Gateway
 
-## Architecture
+## For App Builder / Custom Provider
+
+| Field | Value |
+|-------|--------|
+| Provider type | OpenAI-compatible / Custom |
+| Base URL | `http://personal-ai-hub:8080/v1` |
+| API Key | `pah_…` from Hub → Gateway tokens |
+| Model | `auto` |
+
+Alternative (host bridge): `http://172.17.0.1:18080/v1`
+
+Native Hub API (unchanged): `POST http://personal-ai-hub:8080/api/v1/chat`
+
+## Auth
 
 ```
-SoloHost apps → POST http://personal-ai-hub:8080/api/v1/chat
-                      (or http://172.17.0.1:18080)
-                         ↓
-              Personal AI Hub container
-                 ├── Node API (port 8080)
-                 └── Ollama (127.0.0.1:11434)  ← managed in same container
+Authorization: Bearer pah_…
+# or
+X-Personal-AI-Key: pah_…
+X-SoloHost-App-ID: app-builder
 ```
 
-Apps never call Ollama. Auth: `X-Personal-AI-Key: pah_…`.
-
-## Volumes
-
-- `personal-ai-hub-data` → settings, keys, logs
-- `personal-ai-ollama-data` → local models (survives Hub updates)
+Provider cloud keys never leave the Hub vault.

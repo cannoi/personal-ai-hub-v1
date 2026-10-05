@@ -1,0 +1,3 @@
+# SoloHost install options — no required operator secrets.
+# Provider keys and gateway tokens are configured in the Hub UI after install.
+options: []

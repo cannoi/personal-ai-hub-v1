@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { mkdir } from 'node:fs/promises';
 import { createAiKernel, createActionRegistry, createJsonFileStore } from './ai-app-kernel/src/index.js';
 import { ensureOllama } from './start-ollama.js';
+import { mountOpenAICompat } from './openai-compat.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
@@ -151,53 +152,63 @@ app.get('/health', async (_req, res) => {
  * NEVER returns HTML — always JSON.
  */
 app.get('/api/v1/gateway', (req, res) => {
-  const bases = buildConnectionHints(req);
-  const primary = bases[0];
+  const hostPort = process.env.HOST_PORT || '18080';
+  const dockerBase = `http://${SERVICE_NAME}:8080`;
+  const hostBase = `http://172.17.0.1:${hostPort}`;
+  const externalBase = PUBLIC_BASE_URL || null;
+  const primary = PUBLIC_BASE_URL || dockerBase;
   res.json({
-    name: 'Personal AI Hub',
-    role: 'central-ai-gateway',
-    serviceName: SERVICE_NAME,
-    port: PORT,
-    listen: '0.0.0.0',
-    baseUrls: bases,
-    primaryBaseUrl: primary,
+    service: SERVICE_NAME,
+    role: 'solohost-ai-gateway',
+    version: process.env.npm_package_version || '1.6.0',
+    openaiCompatible: true,
+    defaultModel: 'auto',
+    connections: {
+      docker: {
+        baseUrl: dockerBase,
+        openaiBaseUrl: `${dockerBase}/v1`,
+        note: 'Use from other SoloHost containers on the same Docker network'
+      },
+      host: {
+        baseUrl: hostBase,
+        openaiBaseUrl: `${hostBase}/v1`,
+        note: 'Docker bridge gateway — for containers that cannot resolve service DNS'
+      },
+      ...(externalBase ? {
+        external: {
+          baseUrl: externalBase,
+          openaiBaseUrl: `${externalBase}/v1`,
+          note: 'Advertised PUBLIC_BASE_URL (browser / WAN). Not a bind address.'
+        }
+      } : {})
+    },
+    recommended: {
+      serverToServer: `${dockerBase}/v1`,
+      browser: externalBase ? `${externalBase}/v1` : `${hostBase}/v1`,
+      external: externalBase ? `${externalBase}/v1` : null,
+      nativeChat: `${dockerBase}/api/v1/chat`
+    },
     endpoints: {
-      health: '/api/v1/health',
-      gateway: '/api/v1/gateway',
-      chat: 'POST /api/v1/chat',
-      providers: '/api/v1/providers',
-      keys: '/api/v1/keys',
-      logs: '/api/v1/logs',
-      localModels: '/api/v1/local/models',
-      memory: '/api/v1/memory',
+      openaiModels: 'GET /v1/models',
+      openaiChat: 'POST /v1/chat/completions',
+      openaiHealth: 'GET /v1/health',
+      nativeChat: 'POST /api/v1/chat',
+      health: 'GET /api/v1/health',
+      gateway: 'GET /api/v1/gateway',
       gatewayTokens: '/api/v1/gateway/tokens'
     },
-    absolute: {
-      chat: `${primary}/api/v1/chat`,
-      health: `${primary}/api/v1/health`,
-      gateway: `${primary}/api/v1/gateway`
-    },
     auth: {
-      header: 'X-Personal-AI-Key',
-      alternate: 'Authorization: Bearer pah_…',
-      note: 'Create tokens in Hub UI → Gateway access tokens. Do NOT send Gemini/DeepSeek keys from client apps.'
+      header: 'Authorization: Bearer pah_…  OR  X-Personal-AI-Key: pah_…',
+      createToken: 'POST /api/v1/gateway/tokens'
     },
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Personal-AI-Key': 'pah_… (gateway token from Hub UI)',
-      'X-SoloHost-App-ID': 'app-builder (optional)',
-      'X-Request-Id': 'optional correlation id'
+    example: {
+      curl: `curl -s ${dockerBase}/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer pah_YOUR_TOKEN" -H "X-SoloHost-App-ID: app-builder" -d '{"model":"auto","messages":[{"role":"user","content":"hello"}]}'`
     },
-    examples: {
-      fromSameDockerNetwork: `curl -s -X POST http://${SERVICE_NAME}:${PORT}/api/v1/chat -H 'Content-Type: application/json' -H 'X-SoloHost-App-ID: app-builder' -H 'X-Personal-AI-Key: pah_YOUR_TOKEN' -d '{"message":"xin chao"}'`,
-      nodeFetch: `fetch('http://${SERVICE_NAME}:${PORT}/api/v1/chat',{method:'POST',headers:{'Content-Type':'application/json','X-SoloHost-App-ID':'app-builder','X-Personal-AI-Key':'pah_YOUR_TOKEN'},body:JSON.stringify({message:'xin chao'})}).then(r=>r.json())`
-    },
-    important: [
-      'Do NOT use http://127.0.0.1:PORT from another container — that points at the caller itself.',
-      `From App Builder container use http://${SERVICE_NAME}:${PORT} when both share a Docker network.`,
-      'Or use the host-published URL (PUBLIC_BASE_URL / host IP:HOST_PORT).',
-      'Provider API keys stay inside the Hub vault; apps only use pah_ gateway tokens.',
-      'Managed Ollama runs as service `ollama` on the same stack — apps never call Ollama directly.'
+    notes: [
+      'Provider API keys stay in the Hub vault; apps only use pah_ gateway tokens.',
+      'Managed Ollama runs inside the Hub container — apps never call Ollama directly.',
+      'model=auto uses Hub smart routing (routing mode + health + fallback).',
+      'Do not use http://127.0.0.1 from another container.'
     ]
   });
 });
@@ -212,7 +223,7 @@ app.get('/api/v1/chat', (_req, res) => {
 });
 
 // API routes must never fall through to the SPA HTML shell.
-app.use(['/api', '/ai'], (req, res) => {
+app.use(['/api', '/ai', '/v1'], (req, res) => {
   res.status(404).json({
     error: 'NOT_FOUND',
     path: req.path,
@@ -249,12 +260,10 @@ const runHealthCheck = async () => {
 setTimeout(runHealthCheck, 60_000);
 setInterval(runHealthCheck, HEALTH_INTERVAL_MS).unref();
 
-// Managed Local AI: start Ollama in-process if not already up (SoloHost-safe)
-const ollamaBoot = await ensureOllama().catch((err) => {
-  console.warn('[hub] ensureOllama failed:', err?.message || err);
-  return { ok: false, error: String(err?.message || err) };
-});
-console.log('[hub] Ollama boot status:', JSON.stringify(ollamaBoot));
+// Managed Local AI: start Ollama in background — never block API listen
+ensureOllama()
+  .then((ollamaBoot) => console.log('[hub] Ollama boot status:', JSON.stringify(ollamaBoot)))
+  .catch((err) => console.warn('[hub] ensureOllama failed:', err?.message || err));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Personal AI Hub listening on 0.0.0.0:${PORT}`);
