@@ -1,25 +1,23 @@
-# SoloHost AI Gateway — single UI service
-# Node binds 0.0.0.0:8080; host maps loopback high-port only.
-
+# SoloHost AI Gateway — image-only (no build)
 services:
   personal-ai-hub:
-    image: personal-ai-hub:local
-    build: .
+    image: ghcr.io/cannoi/personal-ai-hub-v1:latest
+    pull_policy: always
     hostname: personal-ai-hub
     labels:
       pi.ui.primary: "true"
     ports:
-      # SoloHost: loopback only on host side
-      - "127.0.0.1:${HOST_PORT:-18080}:8080"
+      - "127.0.0.1:18080:8080"
     environment:
       PORT: "8080"
-      SERVICE_NAME: personal-ai-hub
-      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
-      HOST_PORT: "${HOST_PORT:-18080}"
-      DATA_DIR: /app/data
+      SERVICE_NAME: "personal-ai-hub"
+      AI_HUB_ADMIN_PASSWORD: "${AI_HUB_ADMIN_PASSWORD:-CHANGE_THIS_PASSWORD}"
+      DATA_DIR: "/app/data"
       OLLAMA_HOST: "127.0.0.1:11434"
-      OLLAMA_MODELS: /app/ollama-data
+      OLLAMA_MODELS: "/app/ollama-data"
       OLLAMA_BASE_URL: "http://127.0.0.1:11434"
+      AI_HUB_RATE_LIMIT_PER_MIN: "60"
+      AI_HUB_MAX_CONCURRENT: "10"
     volumes:
       - personal-ai-hub-data:/app/data
       - personal-ai-ollama-data:/app/ollama-data
@@ -29,13 +27,7 @@ services:
       interval: 30s
       timeout: 8s
       retries: 5
-      start_period: 45s
-    networks:
-      - solohost
-
-networks:
-  solohost:
-    name: solohost
+      start_period: 60s
 
 volumes:
   personal-ai-hub-data:

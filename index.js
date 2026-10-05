@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { mkdir } from 'node:fs/promises';
+import crypto from 'node:crypto';
 import { createAiKernel, createActionRegistry, createJsonFileStore } from './ai-app-kernel/src/index.js';
 import { ensureOllama } from './start-ollama.js';
 import { mountOpenAICompat } from './openai-compat.js';
@@ -22,18 +23,35 @@ await mkdir(DATA_DIR, { recursive: true });
 const app = express();
 app.set('trust proxy', true);
 
-// --- CORS: allow SoloHost apps on other containers/origins to call the gateway ---
+// --- CORS + security headers ---
+const ALLOWED_ORIGINS = String(process.env.AI_HUB_ALLOWED_ORIGINS || '')
+  .split(',').map(s => s.trim()).filter(Boolean);
+
 app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+
   const origin = req.headers.origin;
-  // SoloHost apps may call from another origin or from server-side (no Origin).
-  res.setHeader('Access-Control-Allow-Origin', origin || '*');
-  res.setHeader('Vary', 'Origin');
+  if (!origin) {
+    // server-to-server: no CORS headers required
+  } else if (ALLOWED_ORIGINS.length === 0) {
+    // Default: reflect request origin (SoloHost embeds / same LAN) without credentials wildcard
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  } else if (ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes('*')) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Vary', 'Origin');
+  } else {
+    // blocked browser origin — still answer OPTIONS/preflight cleanly for non-credential probes
+    if (req.method === 'OPTIONS') return res.status(403).end();
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
     'Content-Type, Authorization, X-Personal-AI-Key, X-SoloHost-App-ID, X-Request-Id'
   );
-  res.setHeader('Access-Control-Expose-Headers', 'X-Request-Id');
+  res.setHeader('Access-Control-Expose-Headers', 'X-Request-Id, Retry-After');
   if (req.method === 'OPTIONS') return res.status(204).end();
   next();
 });
@@ -106,10 +124,73 @@ const ai = createAiKernel({
   healthFile: path.join(DATA_DIR, 'ai-health.json')
 });
 
+
+// --- Admin authentication (password from AI_HUB_ADMIN_PASSWORD) ---
+const ADMIN_PASSWORD = process.env.AI_HUB_ADMIN_PASSWORD || '';
+const sessions = new Map(); // sid -> { exp }
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+
+function parseCookies(req) {
+  const raw = req.headers.cookie || '';
+  const out = {};
+  for (const part of raw.split(';')) {
+    const [k, ...v] = part.trim().split('=');
+    if (k) out[k] = decodeURIComponent(v.join('=') || '');
+  }
+  return out;
+}
+
+function isAdmin(req) {
+  if (!ADMIN_PASSWORD) return true; // open control plane until password configured
+  const sid = parseCookies(req).ai_hub_admin;
+  const s = sid && sessions.get(sid);
+  if (!s) return false;
+  if (s.exp < Date.now()) { sessions.delete(sid); return false; }
+  return true;
+}
+
+function requireAdmin(req, res, next) {
+  if (isAdmin(req)) return next();
+  return res.status(401).json({ error: 'ADMIN_REQUIRED', message: 'Admin login required' });
+}
+
+app.post('/api/v1/admin/login', express.json(), (req, res) => {
+  if (!ADMIN_PASSWORD) {
+    return res.json({ ok: true, mode: 'open', message: 'AI_HUB_ADMIN_PASSWORD not set — control plane open' });
+  }
+  const password = String(req.body?.password || '');
+  const a = Buffer.from(password);
+  const b = Buffer.from(ADMIN_PASSWORD);
+  // constant-time compare when same length
+  let ok = a.length === b.length && crypto.timingSafeEqual(a.length === b.length ? a : Buffer.alloc(b.length), b);
+  if (a.length !== b.length) ok = false;
+  if (!ok) return res.status(401).json({ error: 'INVALID_PASSWORD' });
+  const sid = crypto.randomBytes(24).toString('base64url');
+  sessions.set(sid, { exp: Date.now() + SESSION_TTL_MS });
+  const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
+  res.setHeader('Set-Cookie', `ai_hub_admin=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_MS / 1000}${secure ? '; Secure' : ''}`);
+  res.json({ ok: true });
+});
+
+app.post('/api/v1/admin/logout', (req, res) => {
+  const sid = parseCookies(req).ai_hub_admin;
+  if (sid) sessions.delete(sid);
+  res.setHeader('Set-Cookie', 'ai_hub_admin=; Path=/; HttpOnly; Max-Age=0');
+  res.json({ ok: true });
+});
+
+app.get('/api/v1/admin/session', (req, res) => {
+  res.json({
+    authenticated: isAdmin(req),
+    passwordConfigured: !!ADMIN_PASSWORD
+  });
+});
+
+
 // Hub UI + internal control plane
-ai.mount(app, '/ai');
+ai.mount(app, '/ai', { requireAdmin });
 // Shared AI API for every SoloHost app (same execution plane)
-ai.mount(app, '/api/v1');
+ai.mount(app, '/api/v1', { requireAdmin });
 
 // OpenAI-compatible Universal Provider — MUST be registered before /v1 JSON 404 catch-all
 mountOpenAICompat(app, { kernel: ai, serviceName: SERVICE_NAME });

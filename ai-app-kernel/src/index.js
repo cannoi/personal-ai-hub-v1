@@ -335,8 +335,8 @@ export function createAiKernel(options = {}) {
             k.models = rankModels([result.model, ...(k.models || [])], result.model);
           }
 
-          state.memory.push({ role: 'user', content: message, ts: now, provider: k.provider, model: result.model, requestId });
-          state.memory.push({ role: 'assistant', content: reply, ts: new Date().toISOString(), provider: k.provider, model: result.model, requestId });
+          state.memory.push({ role: 'user', content: message, ts: now, provider: k.provider, model: result.model, requestId, appId: appId || 'default' });
+          state.memory.push({ role: 'assistant', content: reply, ts: new Date().toISOString(), provider: k.provider, model: result.model, requestId, appId: appId || 'default' });
           state.memory = state.memory.slice(-200);
 
           // Training pairs for local AI self-learning (cloud → local knowledge transfer)
@@ -348,7 +348,8 @@ export function createAiKernel(options = {}) {
               provider: k.provider,
               model: result.model,
               user: message,
-              assistant: reply
+              assistant: reply,
+              appId: appId || 'default'
             });
             state.training = state.training.slice(-500);
           }
@@ -603,31 +604,50 @@ export function createAiKernel(options = {}) {
     },
 
     memory: {
-      async list(limit = 100) {
+      async list(limit = 100, { appId = null, admin = false } = {}) {
         await loadState();
-        return state.memory.slice(-Math.min(limit, 200)).reverse();
+        let rows = state.memory || [];
+        if (!admin) {
+          const id = appId || 'default';
+          rows = rows.filter(m => (m.appId || 'default') === id);
+        }
+        return rows.slice(-Math.min(limit, 200)).reverse();
       },
-      async clear() {
+      async clear({ appId = null, admin = false } = {}) {
         await loadState();
-        state.memory = [];
+        if (admin && !appId) {
+          state.memory = [];
+        } else {
+          const id = appId || 'default';
+          state.memory = (state.memory || []).filter(m => (m.appId || 'default') !== id);
+        }
         await saveState();
-        await logger.write('memory.cleared', 'info', {});
+        await logger.write('memory.cleared', 'info', { appId: appId || (admin ? '*' : 'default') });
         return { success: true };
       },
-      /** Export cloud interaction pairs for local fine-tuning / continued learning offline. */
-      async trainingExport(limit = 200) {
+      async trainingExport(limit = 200, { appId = null, admin = false } = {}) {
         await loadState();
+        let pairs = state.training || [];
+        if (!admin) {
+          const id = appId || 'default';
+          pairs = pairs.filter(p => (p.appId || 'default') === id);
+        }
         return {
           format: 'chat-pairs',
-          count: Math.min((state.training || []).length, limit),
-          pairs: (state.training || []).slice(-limit)
+          count: Math.min(pairs.length, limit),
+          pairs: pairs.slice(-limit)
         };
       },
-      async clearTraining() {
+      async clearTraining({ appId = null, admin = false } = {}) {
         await loadState();
-        state.training = [];
+        if (admin && !appId) {
+          state.training = [];
+        } else {
+          const id = appId || 'default';
+          state.training = (state.training || []).filter(p => (p.appId || 'default') !== id);
+        }
         await saveState();
-        await logger.write('training.cleared', 'info', {});
+        await logger.write('training.cleared', 'info', { appId: appId || (admin ? '*' : 'default') });
         return { success: true };
       }
     },
@@ -636,26 +656,40 @@ export function createAiKernel(options = {}) {
       async listTokens() {
         await loadState();
         return (state.gatewayTokens || []).map(t => ({
-          id: t.id, name: t.name, prefix: t.prefix, createdAt: t.createdAt, lastUsed: t.lastUsed || null
+          id: t.id,
+          name: t.name,
+          prefix: t.prefix,
+          type: t.type || 'app',
+          status: t.appId ? 'bound' : 'unbound',
+          appId: t.appId || null,
+          createdAt: t.createdAt,
+          lastUsed: t.lastUsed || null
         }));
       },
-      async createToken({ name } = {}) {
+      async createToken({ name, type = 'app' } = {}) {
         await loadState();
+        const kind = type === 'shared' ? 'shared' : 'app';
         const raw = 'pah_' + crypto.randomBytes(24).toString('base64url');
         const id = crypto.randomUUID();
         const entry = {
           id,
-          name: String(name || 'SoloHost app').slice(0, 80),
+          name: String(name || (kind === 'shared' ? 'Shared SoloHost' : 'SoloHost app')).slice(0, 80),
+          type: kind,
+          appId: null, // UNBOUND until first use (app tokens only)
           prefix: raw.slice(0, 10) + '…',
           hash: crypto.createHash('sha256').update(raw).digest('hex'),
           createdAt: new Date().toISOString(),
-          lastUsed: null
+          lastUsed: null,
+          _lastPersist: 0
         };
         state.gatewayTokens = state.gatewayTokens || [];
         state.gatewayTokens.push(entry);
         await saveState();
-        await logger.write('gateway.token.created', 'info', { tokenId: id, name: entry.name });
-        return { id, name: entry.name, token: raw, prefix: entry.prefix, createdAt: entry.createdAt };
+        await logger.write('gateway.token.created', 'info', { tokenId: id, name: entry.name, type: kind });
+        return {
+          id, name: entry.name, type: kind, status: 'unbound', appId: null,
+          token: raw, prefix: entry.prefix, createdAt: entry.createdAt
+        };
       },
       async revokeToken(id) {
         await loadState();
@@ -664,15 +698,56 @@ export function createAiKernel(options = {}) {
         await logger.write('gateway.token.revoked', 'info', { tokenId: id });
         return { success: true };
       },
-      async validate(raw) {
+      async unbindToken(id) {
+        await loadState();
+        const hit = (state.gatewayTokens || []).find(t => t.id === id);
+        if (!hit) throw Object.assign(new Error('TOKEN_NOT_FOUND'), { statusCode: 404 });
+        hit.appId = null;
+        await saveState();
+        await logger.write('gateway.token.unbound', 'info', { tokenId: id });
+        return { id: hit.id, status: 'unbound', appId: null, type: hit.type || 'app' };
+      },
+      /**
+       * Validate gateway token + optional App-ID binding.
+       * App tokens: first use binds to X-SoloHost-App-ID; later mismatches → 403.
+       * Shared tokens: any appId allowed.
+       */
+      async validate(raw, { appId = null, bind = true } = {}) {
         if (!raw) return null;
         await loadState();
         const hash = crypto.createHash('sha256').update(String(raw)).digest('hex');
         const hit = (state.gatewayTokens || []).find(t => t.hash === hash);
         if (!hit) return null;
+        const kind = hit.type || 'app';
+        const claimed = appId ? String(appId).slice(0, 80) : null;
+
+        if (kind === 'app') {
+          if (!hit.appId && claimed && bind) {
+            hit.appId = claimed;
+            await logger.write('gateway.token.bound', 'info', { tokenId: hit.id, appId: claimed });
+            await saveState();
+          } else if (hit.appId && claimed && hit.appId !== claimed) {
+            const e = new Error('TOKEN_APP_MISMATCH');
+            e.statusCode = 403;
+            e.code = 'TOKEN_APP_MISMATCH';
+            throw e;
+          }
+        }
+
+        // Throttle lastUsed disk writes (max once / 30s per token)
+        const now = Date.now();
         hit.lastUsed = new Date().toISOString();
-        await saveState();
-        return { id: hit.id, name: hit.name };
+        if (!hit._lastPersist || now - hit._lastPersist > 30_000) {
+          hit._lastPersist = now;
+          await saveState();
+        }
+        return {
+          id: hit.id,
+          name: hit.name,
+          type: kind,
+          appId: hit.appId || claimed || null,
+          status: hit.appId ? 'bound' : 'unbound'
+        };
       }
     },
 
@@ -748,8 +823,8 @@ export function createAiKernel(options = {}) {
 
   return {
     ...kernel,
-    mount(app, prefix = '/ai') {
-      mountKernel(app, { prefix, kernel: this, manage: true });
+    mount(app, prefix = '/ai', opts = {}) {
+      mountKernel(app, { prefix, kernel: this, requireAdmin: opts.requireAdmin || null });
     }
   };
 }

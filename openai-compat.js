@@ -112,7 +112,22 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
           }
         });
       }
-      const ok = await kernel.gateway.validate(hdr);
+      const appIdHdr = req.headers['x-solohost-app-id'] || null;
+      let ok;
+      try {
+        ok = await kernel.gateway.validate(hdr, { appId: appIdHdr, bind: true });
+      } catch (e) {
+        if (e.statusCode === 403) {
+          return res.status(403).json({
+            error: {
+              message: e.message || 'Token is bound to a different app',
+              type: 'invalid_request_error',
+              code: 'TOKEN_APP_MISMATCH'
+            }
+          });
+        }
+        throw e;
+      }
       if (!ok) {
         return res.status(401).json({
           error: {

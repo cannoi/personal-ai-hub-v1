@@ -1,8 +1,8 @@
 {
   "name": "personal-ai-hub",
-  "version": "1.6.2",
+  "version": "1.7.0",
   "type": "module",
-  "description": "Personal AI Hub \u2014 SoloHost AI Gateway (OpenAI-compatible /v1 + multi-provider routing)",
+  "description": "Personal AI Hub \u2014 secure multi-app SoloHost AI Gateway",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
