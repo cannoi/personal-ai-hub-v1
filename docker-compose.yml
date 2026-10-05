@@ -1,17 +1,17 @@
-# SoloHost AI Gateway — image-only (no build)
 services:
   personal-ai-hub:
     image: ghcr.io/cannoi/personal-ai-hub-v1:latest
     pull_policy: always
+    restart: unless-stopped
     hostname: personal-ai-hub
     labels:
       pi.ui.primary: "true"
     ports:
-      - "127.0.0.1:18080:8080"
+      - "8080"
     environment:
+      AI_HUB_ADMIN_PASSWORD: "${AI_HUB_ADMIN_PASSWORD}"
       PORT: "8080"
       SERVICE_NAME: "personal-ai-hub"
-      AI_HUB_ADMIN_PASSWORD: "${AI_HUB_ADMIN_PASSWORD:-CHANGE_THIS_PASSWORD}"
       DATA_DIR: "/app/data"
       OLLAMA_HOST: "127.0.0.1:11434"
       OLLAMA_MODELS: "/app/ollama-data"
@@ -21,7 +21,6 @@ services:
     volumes:
       - personal-ai-hub-data:/app/data
       - personal-ai-ollama-data:/app/ollama-data
-    restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 30s

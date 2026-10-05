@@ -1,43 +1,18 @@
-# UPGRADE REPORT — v1.7.0 Security + multi-app isolation
+# v1.7.1 — Admin login UI gate
 
-## Conclusion: SECURE WITH LIMITATIONS
+## Problem
+`AI_HUB_ADMIN_PASSWORD` was in SoloHost config/compose, and API had `/api/v1/admin/login`,
+but the SPA still loaded fully without prompting for a password (anyone with the public URL could use the control UI).
 
-### Findings addressed
-| Area | Change |
-|------|--------|
-| Admin | `AI_HUB_ADMIN_PASSWORD` + HttpOnly session cookie; protects control-plane |
-| Gateway tokens | type `app`/`shared`; **UNBOUND → first-use bind** to X-SoloHost-App-ID; mismatch → 403; admin **unbind** |
-| Memory / training | Tagged + filtered by `appId` |
-| Rate limit | 60/min/token, 10 concurrent (env configurable); health excluded |
-| CORS | No `*` with credentials; reflect origin or `AI_HUB_ALLOWED_ORIGINS` |
-| SSRF | `security.js` blocks private/metadata URLs (Ollama localhost allowed internally) |
-| Secret leakage | Existing redaction kept; admin password never in health/gateway |
-| lastUsed writes | Throttled to ≥30s |
+## Fix
+1. **Login overlay** (`#login-gate`) when `passwordConfigured && !authenticated`
+2. `fetch` / `json()` uses **`credentials: 'include'`** so HttpOnly session cookie is sent
+3. **Logout** button when password mode is on
+4. Boot waits for `GET /api/v1/admin/session` before loading dashboard
+5. Control-plane routes still use `requireAdmin` (401 without session)
 
-### Files changed
-- `ai-app-kernel/src/index.js` — gateway bind/unbind, memory isolation
-- `ai-app-kernel/src/http.js` — admin guard, rate limit, unbind route
-- `ai-app-kernel/src/security.js` — **NEW** rate limit + SSRF helpers
-- `openai-compat.js` — app binding on validate
-- `index.js` — admin login/logout/session, CORS, security headers
-- `docker-compose.yml` — image-only SoloHost + `AI_HUB_ADMIN_PASSWORD`
-- `test-security.js` — **NEW** binding/isolation/SSRF tests
-- `test.js` — regression OpenAI routes
+## Data plane (unchanged)
+OpenAI `/v1/*` and chat with gateway token do **not** use admin password.
 
-### Not done / limitations
-- Full SPA admin login form (API ready; without password control plane stays open)
-- Custom cloud provider URL SSRF not fully wired into every provider add path
-- Daily cloud budget (optional) not implemented
-- Non-root Docker user not forced (Ollama compatibility)
-- No Redis (in-memory rate limit only)
-
-### Tests
-- `node test.js` → PASS (OpenAI /v1 HTTP)
-- `node test-security.js` → PASS (bind, shared, isolation, SSRF, rate limit)
-
-### SoloHost
-```yaml
-environment:
-  AI_HUB_ADMIN_PASSWORD: "CHANGE_THIS_PASSWORD"
-```
-Image: `ghcr.io/cannoi/personal-ai-hub-v1:latest` — no build, no docker.sock, no :11434 public.
+## Tests
+- `node test.js` / `node test-security.js` (existing)

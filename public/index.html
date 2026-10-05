@@ -41,6 +41,23 @@
   </style>
 <style>.paf-made-by{position:fixed;right:8px;bottom:8px;width:min(72px,12vw);max-width:12vw;height:auto;object-fit:contain;opacity:.5;background:transparent;padding:0;border:0;box-shadow:none;filter:none;pointer-events:none;z-index:30}</style></head>
 <body class="h-full flex flex-col font-sans overflow-hidden">
+  <div id="login-gate" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 backdrop-blur-sm p-4">
+    <div class="w-full max-w-sm rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
+      <div class="text-center mb-5">
+        <div class="text-2xl font-bold tracking-tight">Personal AI Hub</div>
+        <p class="text-xs text-slate-400 mt-2">Admin access required</p>
+      </div>
+      <label class="block text-[11px] uppercase text-slate-500 mb-1">Password</label>
+      <input id="login-password" type="password" autocomplete="current-password"
+        class="w-full rounded-xl bg-slate-800 border border-slate-700 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        placeholder="Admin password">
+      <p id="login-error" class="text-rose-400 text-xs mt-2 hidden"></p>
+      <button id="login-submit" type="button"
+        class="mt-4 w-full rounded-xl bg-indigo-600 hover:bg-indigo-500 py-2.5 text-sm font-semibold">Sign in</button>
+      <p class="text-[10px] text-slate-500 mt-4 text-center">SoloHost · AI_HUB_ADMIN_PASSWORD</p>
+    </div>
+  </div>
+
 
   <!-- Header -->
   <header class="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-20 shrink-0">
@@ -64,6 +81,9 @@
         </button>
         <button id="hub-nav-btn" class="inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-indigo-600 text-white text-xs font-medium border border-indigo-500">
           <i class="fa-solid fa-house"></i><span class="hidden sm:inline">Hub</span>
+        </button>
+        <button id="logout-btn" class="hidden inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700" title="Logout">
+          <i class="fa-solid fa-right-from-bracket text-slate-400"></i><span class="hidden sm:inline">Logout</span>
         </button>
         <button id="settings-btn" class="inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700">
           <i class="fa-solid fa-gear text-indigo-400"></i><span class="hidden sm:inline">Settings</span>
@@ -627,7 +647,22 @@
 (() => {
   const $ = id => document.getElementById(id);
   const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  async function json(url, options) { const r=await fetch(url, options); const d=await r.json().catch(()=>({})); if(!r.ok) throw new Error(d.error||`HTTP ${r.status}`); return d; }
+  async function json(url, options={}) {
+    const opts = Object.assign({ credentials: 'include' }, options || {});
+    if (opts.headers && opts.body && !opts.headers['Content-Type'] && !opts.headers['content-type']) {
+      opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers);
+    }
+    const r = await fetch(url, opts);
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = (d && d.error && (d.error.message || d.error)) || d.message || ('HTTP ' + r.status);
+      const err = new Error(typeof msg === 'string' ? msg : JSON.stringify(msg));
+      err.status = r.status;
+      err.payload = d;
+      throw err;
+    }
+    return d;
+  }
   async function refreshChatSelectors(){try{const [p,k]=await Promise.all([json('/ai/providers'),json('/ai/keys')]);const ps=$('chat-provider'),ms=$('chat-model');ps.innerHTML='<option value="">Auto Provider</option>'+(p.providers||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');const all=k.keys||[];const fill=()=>{const provider=ps.value;const models=[...new Set(all.filter(x=>x.status==='ACTIVE'&&(!provider||x.provider===provider)).flatMap(x=>x.models||[]))];ms.innerHTML='<option value="">Auto Model</option>'+models.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join('');};ps.onchange=fill;fill();}catch(e){console.error(e);}}
   async function refreshDashboard() {
     try { const [providers, keys, health, local, logs] = await Promise.all([json('/ai/providers'),json('/ai/keys'),json('/ai/health'),json('/ai/local/models'),json('/ai/logs?limit=8')]);
@@ -788,8 +823,67 @@
     } finally { b.disabled = false; b.textContent = 'Download'; }
   };
 
-  window.refreshDashboardExternal = async function(){ await refreshDashboard(); await refreshGateway(); };
-  refreshDashboard();
+
+  async function ensureAdminSession() {
+    try {
+      const s = await json('/api/v1/admin/session');
+      if (s.passwordConfigured && !s.authenticated) {
+        document.getElementById('login-gate').classList.remove('hidden');
+        return false;
+      }
+      document.getElementById('login-gate').classList.add('hidden');
+      if (s.passwordConfigured) {
+        const lb = document.getElementById('logout-btn');
+        if (lb) lb.classList.remove('hidden');
+      }
+      return true;
+    } catch (e) {
+      // if session endpoint fails, still try UI (legacy)
+      return true;
+    }
+  }
+
+  async function doLogin() {
+    const pw = document.getElementById('login-password').value;
+    const err = document.getElementById('login-error');
+    err.classList.add('hidden');
+    try {
+      await json('/api/v1/admin/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: pw })
+      });
+      document.getElementById('login-gate').classList.add('hidden');
+      document.getElementById('login-password').value = '';
+      const lb = document.getElementById('logout-btn');
+      if (lb) lb.classList.remove('hidden');
+      await refreshDashboard();
+      if (typeof refreshGateway === 'function') await refreshGateway();
+    } catch (e) {
+      err.textContent = e.message || 'Login failed';
+      err.classList.remove('hidden');
+    }
+  }
+
+  const loginBtn = document.getElementById('login-submit');
+  const loginPw = document.getElementById('login-password');
+  if (loginBtn) loginBtn.onclick = doLogin;
+  if (loginPw) loginPw.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+  const logoutBtn = document.getElementById('logout-btn');
+  if (logoutBtn) logoutBtn.onclick = async () => {
+    try { await json('/api/v1/admin/logout', { method: 'POST' }); } catch {}
+    location.reload();
+  };
+
+  window.refreshDashboardExternal = async function(){ await refreshDashboard(); if (typeof refreshGateway==='function') await refreshGateway(); };
+  (async function boot() {
+    const ok = await ensureAdminSession();
+    if (ok) {
+      await refreshDashboard();
+      if (typeof refreshGateway === 'function') await refreshGateway();
+    }
+  })();
+
   refreshChatSelectors();
   refreshGateway().catch(function(){});
 })();

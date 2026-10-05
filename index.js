@@ -126,7 +126,7 @@ const ai = createAiKernel({
 
 
 // --- Admin authentication (password from AI_HUB_ADMIN_PASSWORD) ---
-const ADMIN_PASSWORD = process.env.AI_HUB_ADMIN_PASSWORD || '';
+const ADMIN_PASSWORD = String(process.env.AI_HUB_ADMIN_PASSWORD || '').trim();
 const sessions = new Map(); // sid -> { exp }
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 
@@ -156,20 +156,23 @@ function requireAdmin(req, res, next) {
 
 app.post('/api/v1/admin/login', express.json(), (req, res) => {
   if (!ADMIN_PASSWORD) {
-    return res.json({ ok: true, mode: 'open', message: 'AI_HUB_ADMIN_PASSWORD not set — control plane open' });
+    return res.json({ ok: true, mode: 'open', message: 'AI_HUB_ADMIN_PASSWORD not set — set it in SoloHost config to lock the admin UI' });
   }
   const password = String(req.body?.password || '');
-  const a = Buffer.from(password);
-  const b = Buffer.from(ADMIN_PASSWORD);
-  // constant-time compare when same length
-  let ok = a.length === b.length && crypto.timingSafeEqual(a.length === b.length ? a : Buffer.alloc(b.length), b);
-  if (a.length !== b.length) ok = false;
-  if (!ok) return res.status(401).json({ error: 'INVALID_PASSWORD' });
+  // Constant-time compare via SHA-256 digests (equal length)
+  const dig = (s) => crypto.createHash('sha256').update(String(s)).digest();
+  const ok = crypto.timingSafeEqual(dig(password), dig(ADMIN_PASSWORD));
+  if (!ok) {
+    return res.status(401).json({ error: 'INVALID_PASSWORD', message: 'Wrong admin password' });
+  }
   const sid = crypto.randomBytes(24).toString('base64url');
   sessions.set(sid, { exp: Date.now() + SESSION_TTL_MS });
   const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
-  res.setHeader('Set-Cookie', `ai_hub_admin=${sid}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${SESSION_TTL_MS / 1000}${secure ? '; Secure' : ''}`);
-  res.json({ ok: true });
+  res.setHeader(
+    'Set-Cookie',
+    `ai_hub_admin=${encodeURIComponent(sid)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secure ? '; Secure' : ''}`
+  );
+  res.json({ ok: true, authenticated: true });
 });
 
 app.post('/api/v1/admin/logout', (req, res) => {

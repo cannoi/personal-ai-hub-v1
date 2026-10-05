@@ -1,3 +1,12 @@
-# SoloHost install options — no required operator secrets.
-# Provider keys and gateway tokens are configured in the Hub UI after install.
-options: []
+title: "Personal AI Hub"
+eyebrow: SoloHost AI Gateway
+description: "Personal AI Gateway with Local AI, multi-provider routing, and secure app access."
+footer_hint: "Only enter your Admin access password. AI providers and other settings are managed inside Personal AI Hub."
+output_file: .env
+
+fields:
+  - name: AI_HUB_ADMIN_PASSWORD
+    label: Admin access password
+    type: password
+    preserve_if_blank: true
+    help: "Required to access Hub administration. Use at least 16 characters and keep it private."
