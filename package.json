@@ -1,0 +1,14 @@
+{
+  "name": "personal-ai-hub",
+  "version": "1.5.1",
+  "type": "module",
+  "description": "Personal AI Hub \u2014 gateway + managed in-container Ollama + multi-provider routing",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "node test.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}

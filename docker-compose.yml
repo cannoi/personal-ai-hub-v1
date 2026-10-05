@@ -1,0 +1,42 @@
+# Personal AI Hub — managed Local AI (Ollama runs *inside* the Hub container)
+# Models persist on volume personal-ai-ollama-data.
+# Apps only call Hub API — never Ollama directly.
+
+services:
+  personal-ai-hub:
+    build: .
+    image: personal-ai-hub:local
+    container_name: personal-ai-hub
+    hostname: personal-ai-hub
+    ports:
+      - "${HOST_PORT:-18080}:8080"
+    environment:
+      PORT: "8080"
+      SERVICE_NAME: personal-ai-hub
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-http://172.17.0.1:18080}"
+      HOST_PORT: "${HOST_PORT:-18080}"
+      DATA_DIR: /app/data
+      OLLAMA_HOST: "127.0.0.1:11434"
+      OLLAMA_MODELS: /app/ollama-data
+      OLLAMA_BASE_URL: "http://127.0.0.1:11434"
+      AI_HUB_MASTER_KEY: "${AI_HUB_MASTER_KEY:-}"
+    volumes:
+      - personal-ai-hub-data:/app/data
+      - personal-ai-ollama-data:/app/ollama-data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 60s
+    networks:
+      - solohost
+
+networks:
+  solohost:
+    name: solohost
+
+volumes:
+  personal-ai-hub-data:
+  personal-ai-ollama-data:
