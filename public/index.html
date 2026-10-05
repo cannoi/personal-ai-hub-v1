@@ -39,7 +39,8 @@
       background: rgba(99, 102, 241, 0.5);
     }
   </style>
-<style>.paf-made-by{position:fixed;right:8px;bottom:8px;width:min(72px,12vw);max-width:12vw;height:auto;object-fit:contain;opacity:.5;background:transparent;padding:0;border:0;box-shadow:none;filter:none;pointer-events:none;z-index:30}</style></head>
+<style>.paf-made-by{position:fixed;right:8px;bottom:8px;width:min(72px,12vw);max-width:12vw;height:auto;object-fit:contain;opacity:.5;background:transparent;padding:0;border:0;box-shadow:none;filter:none;pointer-events:none;z-index:30}</style>  <script src="/shfh-client.js" defer></script>
+</head>
 <body class="h-full flex flex-col font-sans overflow-hidden">
   <div id="login-gate" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 backdrop-blur-sm p-4">
     <div class="w-full max-w-sm rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
@@ -60,6 +61,40 @@
 
 
   <!-- Header -->
+  
+  <div id="feedback-panel" class="hidden fixed inset-0 z-[90] flex items-end sm:items-center justify-center bg-black/60 p-3 sm:p-6">
+    <div class="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-slate-800">
+        <div>
+          <div class="font-semibold text-sm">Feedback</div>
+          <div class="text-[10px] text-slate-500">SoloHost Feedback Hub</div>
+        </div>
+        <button type="button" id="feedback-close" class="h-8 w-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"><i class="fa-solid fa-xmark"></i></button>
+      </div>
+      <div class="p-4 space-y-4">
+        <section class="rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
+          <div class="text-[10px] uppercase tracking-wide text-amber-400/90 mb-1">Donate</div>
+          <div id="feedback-donate-body" class="text-xs text-slate-300 whitespace-pre-wrap break-words">Loading…</div>
+        </section>
+        <section>
+          <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Unread notices</div>
+          <div id="feedback-notices" class="space-y-2 text-xs text-slate-300 max-h-40 overflow-y-auto"><div class="text-slate-500">No notices</div></div>
+        </section>
+        <section>
+          <div class="text-[10px] uppercase tracking-wide text-slate-500 mb-1">Send feedback</div>
+          <select id="feedback-type" class="w-full mb-2 rounded-lg bg-slate-800 border border-slate-700 px-2 py-2 text-xs">
+            <option value="bug">Bug</option>
+            <option value="improvement">Improvement</option>
+            <option value="question">Question</option>
+          </select>
+          <textarea id="feedback-message" rows="4" class="w-full rounded-lg bg-slate-800 border border-slate-700 px-3 py-2 text-sm" placeholder="Describe the issue or idea… (no passwords or API keys)"></textarea>
+          <button type="button" id="feedback-send" class="mt-2 w-full rounded-xl bg-indigo-600 hover:bg-indigo-500 py-2 text-sm font-semibold">Send</button>
+          <p id="feedback-status" class="text-[11px] text-slate-500 mt-2"></p>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <header class="border-b border-slate-800 bg-slate-900/90 backdrop-blur sticky top-0 z-20 shrink-0">
     <div class="px-3 sm:px-4 lg:px-6 py-2.5 flex items-center justify-between gap-2 min-h-[3.25rem]">
       <div class="flex items-center gap-2 sm:gap-3 min-w-0">
@@ -84,6 +119,11 @@
         </button>
         <button id="logout-btn" class="hidden inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700" title="Logout">
           <i class="fa-solid fa-right-from-bracket text-slate-400"></i><span class="hidden sm:inline">Logout</span>
+        </button>
+        <button id="feedback-btn" type="button" class="relative inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700" title="Feedback">
+          <i class="fa-solid fa-comment-dots text-amber-400"></i>
+          <span class="hidden sm:inline">Feedback</span>
+          <span id="feedback-badge" class="hidden absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full bg-rose-500 text-[10px] leading-[1.1rem] text-center font-bold">0</span>
         </button>
         <button id="settings-btn" class="inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700">
           <i class="fa-solid fa-gear text-indigo-400"></i><span class="hidden sm:inline">Settings</span>
@@ -875,6 +915,104 @@
     location.reload();
   };
 
+
+  // SoloHost Feedback Hub — embedded, no user config required
+  let shfh = null;
+  async function initFeedbackHub() {
+    const btn = $('feedback-btn');
+    const panel = $('feedback-panel');
+    if (!btn || !panel) return;
+    if (typeof SHFH === 'undefined') {
+      // SDK not loaded yet — retry once
+      await new Promise(r => setTimeout(r, 300));
+      if (typeof SHFH === 'undefined') return;
+    }
+    let cfg;
+    try { cfg = await json('/api/shfh-config'); } catch { return; }
+    if (!cfg || cfg.enabled === false) { btn.classList.add('hidden'); return; }
+    try {
+      shfh = SHFH.create({
+        hubUrl: cfg.hubUrl,
+        ingestToken: cfg.ingestToken,
+        appId: cfg.appId,
+        appName: cfg.appName,
+        version: cfg.version || '1.8.1',
+        platform: 'solohost',
+        locale: document.documentElement.lang || 'en'
+      });
+    } catch (e) { console.warn('SHFH', e); return; }
+
+    function setBadge(n) {
+      const b = $('feedback-badge');
+      if (!b) return;
+      if (n > 0) { b.textContent = n > 9 ? '9+' : String(n); b.classList.remove('hidden'); }
+      else b.classList.add('hidden');
+    }
+
+    async function refreshFeedbackPanel() {
+      const st = $('feedback-status');
+      try {
+        const snap = await shfh.sync();
+        const donateEl = $('feedback-donate-body');
+        const d = snap && snap.donate;
+        if (donateEl) {
+          if (typeof d === 'string' && d.trim()) donateEl.textContent = d;
+          else if (d && typeof d === 'object')
+            donateEl.textContent = [d.text, d.account, d.note, d.url].filter(Boolean).join('\n') || 'Thank you for supporting SoloHost apps.';
+          else donateEl.textContent = 'Thank you for supporting SoloHost apps.';
+        }
+        const box = $('feedback-notices');
+        const notices = ((snap && snap.actions) || []).filter(Boolean);
+        if (box) {
+          if (!notices.length) box.innerHTML = '<div class="text-slate-500">No unread notices</div>';
+          else {
+            box.innerHTML = notices.map(function(n) {
+              var id = n.id || '';
+              var title = n.title || n.kind || 'Notice';
+              var body = n.body || '';
+              return '<div class="rounded-lg border border-slate-800 bg-slate-950/50 p-2"><div class="font-medium text-slate-200">' +
+                esc(title) + '</div><div class="text-slate-400 mt-0.5 whitespace-pre-wrap">' + esc(body) + '</div>' +
+                (id ? '<button type="button" data-notice-id="' + esc(id) + '" class="mt-1 text-[10px] text-indigo-400">Mark read</button>' : '') + '</div>';
+            }).join('');
+            box.querySelectorAll('[data-notice-id]').forEach(function(b) {
+              b.onclick = async function() {
+                try { await shfh.markRead(b.dataset.noticeId); } catch (e) {}
+                await refreshFeedbackPanel();
+              };
+            });
+          }
+        }
+        setBadge(notices.length);
+      } catch (e) {
+        if (st) st.textContent = 'Hub offline — feedback can queue locally.';
+      }
+    }
+
+    btn.onclick = async function() {
+      panel.classList.remove('hidden');
+      await refreshFeedbackPanel();
+    };
+    if ($('feedback-close')) $('feedback-close').onclick = function() { panel.classList.add('hidden'); };
+    panel.addEventListener('click', function(e) { if (e.target === panel) panel.classList.add('hidden'); });
+    if ($('feedback-send')) $('feedback-send').onclick = async function() {
+      var msg = (($('feedback-message') && $('feedback-message').value) || '').trim();
+      var type = ($('feedback-type') && $('feedback-type').value) || 'bug';
+      var st = $('feedback-status');
+      if (!msg) { if (st) st.textContent = 'Please enter a message.'; return; }
+      if (st) st.textContent = 'Sending…';
+      try {
+        await shfh.sendFeedback({ type: type, message: msg });
+        if ($('feedback-message')) $('feedback-message').value = '';
+        if (st) st.textContent = 'Sent. Thank you!';
+        await refreshFeedbackPanel();
+      } catch (e) {
+        if (st) st.textContent = (e && e.message) || 'Send failed (may be queued).';
+      }
+    };
+    refreshFeedbackPanel();
+    setInterval(function() { refreshFeedbackPanel().catch(function(){}); }, 120000);
+  }
+
   window.refreshDashboardExternal = async function(){ await refreshDashboard(); if (typeof refreshGateway==='function') await refreshGateway(); };
   (async function boot() {
     const ok = await ensureAdminSession();
@@ -882,6 +1020,7 @@
       await refreshDashboard();
       if (typeof refreshGateway === 'function') await refreshGateway();
     }
+    try { await initFeedbackHub(); } catch (e) { console.warn(e); }
   })();
 
   refreshChatSelectors();

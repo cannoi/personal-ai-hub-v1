@@ -133,4 +133,7 @@ export function mountKernel(app, { prefix = '/ai', kernel, requireAdmin = null }
   app.post(`${prefix}/gateway/tokens/:id/unbind`, adminGuard, asyncRoute(async (req, res) =>
     res.json(await kernel.gateway.unbindToken(req.params.id))
   ));
+  app.get(`${prefix}/gateway/usage`, adminGuard, asyncRoute(async (req, res) =>
+    res.json(await kernel.gateway.usage({ tokenId: req.query.tokenId || null, appId: req.query.appId || null }))
+  ));
 }

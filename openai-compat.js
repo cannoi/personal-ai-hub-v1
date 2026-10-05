@@ -75,8 +75,11 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       const message = String(err?.message || err);
       let status = err?.statusCode || err?.status || 400;
       if (/NO_ACTIVE_KEY|NO_PROVIDER|ALL_PROVIDERS/i.test(message)) status = 503;
+      if (/RATE_LIMIT|USAGE_QUOTA_EXCEEDED/i.test(message)) status = 429;
       if (/INVALID_GATEWAY|AUTH|MISSING_GATEWAY/i.test(message)) status = 401;
       try {
+        if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
+        if (req.gatewayTokenId) await kernel.gateway.recordUsage({ tokenId: req.gatewayTokenId, appId: req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || null, error: true });
         await kernel.logs.write('api.error', 'error', {
           path: req.path, method: req.method, error: message,
           appId: req.headers['x-solohost-app-id'] || null
@@ -100,8 +103,10 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       const tokens = await kernel.gateway.listTokens();
       if (!tokens.length) return next();
       const hdr = req.headers['x-personal-ai-key']
-        || (String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i) || [])[1]
-        || req.query?.api_key;
+        || (String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i) || [])[1];
+      if (req.query?.api_key) {
+        return res.status(401).json({ error: { message: 'API keys in query parameters are not supported. Use Authorization: Bearer or X-Personal-AI-Key.', type: 'invalid_request_error', code: 'API_KEY_IN_QUERY_NOT_ALLOWED' } });
+      }
       if (!hdr) {
         if (isBrowserSameOrigin(req)) return next();
         return res.status(401).json({
@@ -137,7 +142,12 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
           }
         });
       }
-      req.gatewayApp = ok;
+      const lease = await kernel.gateway.acquire(hdr, { appId: appIdHdr });
+      if (!lease) return res.status(401).json({ error: { message: 'Invalid API key', type: 'invalid_request_error', code: 'INVALID_GATEWAY_TOKEN' } });
+      req.gatewayApp = lease;
+      req.gatewayTokenId = lease.id;
+      req.gatewayTokenRaw = hdr;
+      req.gatewayLease = lease;
       return next();
     } catch (e) {
       return res.status(500).json({
@@ -192,53 +202,63 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
 
   const chatCompletions = asyncRoute(async (req, res) => {
     const body = req.body || {};
-    if (body.stream === true) {
-      return res.status(400).json({
-        error: {
-          message: 'stream=true is not supported yet; use stream=false',
-          type: 'invalid_request_error',
-          code: 'STREAM_NOT_SUPPORTED'
-        }
-      });
-    }
     const parsed = parseModel(body.model);
     const { message, system } = messagesToPrompt(body.messages);
-    if (!message) {
-      return res.status(400).json({
-        error: { message: 'messages required', type: 'invalid_request_error', code: 'MESSAGES_REQUIRED' }
-      });
-    }
+    if (!message) return res.status(400).json({ error: { message: 'messages required', type: 'invalid_request_error', code: 'MESSAGES_REQUIRED' } });
     const requestId = req.headers['x-request-id'] || `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
-    const appId = req.headers['x-solohost-app-id'] || req.gatewayApp?.name || body.user || null;
+    const appId = req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || body.user || null;
     const started = Date.now();
-    const result = await kernel.chat({
-      message,
-      system: system || undefined,
-      provider: parsed.provider || undefined,
-      model: parsed.model || undefined,
-      requestId,
-      appId
-    });
-    res.json({
-      id: requestId.startsWith('chatcmpl-') ? requestId : `chatcmpl-${requestId}`,
-      object: 'chat.completion',
-      created: Math.floor(Date.now() / 1000),
-      model: result.model || body.model || 'auto',
-      choices: [{
-        index: 0,
-        message: { role: 'assistant', content: result.reply || '' },
-        finish_reason: 'stop',
-        logprobs: null
-      }],
-      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
-      personal_ai_hub: {
-        provider: result.provider || null,
-        keyId: result.keyId || null,
-        requestId: result.requestId || requestId,
-        latencyMs: Date.now() - started,
-        appId
-      }
-    });
+    const result = await kernel.chat({ message, system: system || undefined, provider: parsed.provider || undefined, model: parsed.model || undefined, requestId, appId });
+    const usage = result.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+    await kernel.gateway.recordUsage({ tokenId: req.gatewayTokenId, appId, usage, error: !!result.error });
+    if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
+    const id = requestId.startsWith('chatcmpl-') ? requestId : `chatcmpl-${requestId}`;
+    const payload = {
+      id, object: 'chat.completion', created: Math.floor(Date.now()/1000), model: result.model || body.model || 'auto',
+      choices: [{ index: 0, message: { role: 'assistant', content: result.reply || '' }, finish_reason: 'stop', logprobs: null }],
+      usage,
+      personal_ai_hub: { provider: result.provider || null, keyId: result.keyId || null, requestId: result.requestId || requestId, latencyMs: Date.now()-started, appId }
+    };
+    if (body.stream === true) {
+      res.status(200);
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      const chunk = { id, object:'chat.completion.chunk', created:payload.created, model:payload.model, choices:[{index:0,delta:{role:'assistant',content:result.reply||''},finish_reason:null}] };
+      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
+      res.write(`data: ${JSON.stringify({...chunk, choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`);
+      res.write(`data: [DONE]\n\n`);
+      return res.end();
+    }
+    res.setHeader('X-Request-Id', requestId);
+    return res.json(payload);
+  });
+
+  const responses = asyncRoute(async (req, res) => {
+    const body = req.body || {};
+    const input = typeof body.input === 'string' ? body.input : (Array.isArray(body.input) ? body.input.map(x => typeof x === 'string' ? x : extractText(x?.content || x)).join('\n') : '');
+    if (!input.trim()) return res.status(400).json({ error:{message:'input required',type:'invalid_request_error',code:'INPUT_REQUIRED'} });
+    const parsed = parseModel(body.model);
+    const requestId = req.headers['x-request-id'] || `resp-${randomUUID().replace(/-/g,'').slice(0,24)}`;
+    const appId = req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || null;
+    const result = await kernel.chat({ message:input, system: typeof body.instructions === 'string' ? body.instructions : undefined, provider:parsed.provider || undefined, model:parsed.model || undefined, appId, requestId });
+    const usage = result.usage || {prompt_tokens:0,completion_tokens:0,total_tokens:0};
+    await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage,error:!!result.error});
+    if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
+    res.setHeader('X-Request-Id', requestId);
+    return res.json({ id:requestId, object:'response', created_at:Math.floor(Date.now()/1000), model:result.model || body.model || 'auto', output:[{id:`msg_${randomUUID().replace(/-/g,'').slice(0,20)}`,type:'message',role:'assistant',content:[{type:'output_text',text:result.reply || ''}]}], status:'completed', usage });
+  });
+
+  const embeddings = asyncRoute(async (req, res) => {
+    const body=req.body||{};
+    if (!body.input || (Array.isArray(body.input) && !body.input.length)) return res.status(400).json({error:{message:'input required',type:'invalid_request_error',code:'INPUT_REQUIRED'}});
+    const parsed=parseModel(body.model);
+    const appId=req.headers['x-solohost-app-id']||req.gatewayApp?.appId||null;
+    const result=await kernel.embed({input:body.input,provider:parsed.provider||undefined,model:parsed.model||undefined,appId});
+    await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage:result.usage,error:false});
+    if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
+    res.setHeader('X-Request-Id',result.requestId);
+    return res.json({object:'list',data:result.data||[],model:result.model||body.model,usage:result.usage||{prompt_tokens:0,total_tokens:0}});
   });
 
   const health = asyncRoute(async (_req, res) => {
@@ -252,6 +272,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       localModels: h.localModels || 0,
       activeKeys: h.activeKeys,
       routingMode: h.routingMode || null,
+      gateway: { authentication: true, rateLimit: true, usageControl: true, fallback: true, endpoints: ['/v1/models','/v1/chat/completions','/v1/responses','/v1/embeddings'] },
       service: serviceName
     });
   });
@@ -266,6 +287,8 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     ['get', '/v1/health', [health]],
     ['get', '/v1/models', [gatewayAuth, listModels]],
     ['post', '/v1/chat/completions', [gatewayAuth, chatCompletions]],
+    ['post', '/v1/responses', [gatewayAuth, responses]],
+    ['post', '/v1/embeddings', [gatewayAuth, embeddings]],
     ['get', '/v1/chat/completions', [(_req, res) => res.status(405).json({
       error: { message: 'Use POST /v1/chat/completions', type: 'invalid_request_error', code: 'METHOD_NOT_ALLOWED' }
     })]],
@@ -273,12 +296,14 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     ['get', '/openai/v1/__ping', [ping]],
     ['get', '/openai/v1/health', [health]],
     ['get', '/openai/v1/models', [gatewayAuth, listModels]],
-    ['post', '/openai/v1/chat/completions', [gatewayAuth, chatCompletions]]
+    ['post', '/openai/v1/chat/completions', [gatewayAuth, chatCompletions]],
+    ['post', '/openai/v1/responses', [gatewayAuth, responses]],
+    ['post', '/openai/v1/embeddings', [gatewayAuth, embeddings]]
   ];
 
   for (const [method, path, handlers] of paths) {
     app[method](path, ...handlers);
   }
 
-  console.log('[hub] OpenAI-compatible routes mounted: GET /v1/models POST /v1/chat/completions GET /v1/health');
+  console.log('[hub] OpenAI-compatible routes mounted: GET /v1/models POST /v1/chat/completions POST /v1/responses POST /v1/embeddings GET /v1/health');
 }

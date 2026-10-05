@@ -2,8 +2,9 @@ import crypto from 'node:crypto';
 import { mountKernel } from './http.js';
 import { createSecretVault } from './vault.js';
 import { createActivityLogger } from './logger.js';
-import { providerCatalog, listModels, chatProvider, isChatCapableModel, rankChatModels } from './providers.js';
+import { providerCatalog, listModels, chatProvider, embedProvider, isChatCapableModel, rankChatModels } from './providers.js';
 import { createLocalModelManager } from './local.js';
+import { createRateLimiter } from './security.js';
 
 export function createAiKernel(options = {}) {
   const schema = options.schema || { name: 'app', collections: [] };
@@ -36,6 +37,11 @@ export function createAiKernel(options = {}) {
   let state = null;
   const local = createLocalModelManager(providers.local, fetchImpl);
   let lastLocalFailLog = 0;
+  const gatewayWindows = new Map();
+  const gatewayRateLimiter = createRateLimiter({
+    perMinute: Number(process.env.AI_HUB_GATEWAY_RATE_LIMIT_PER_MIN || process.env.AI_HUB_RATE_LIMIT_PER_MIN || 60),
+    maxConcurrent: Number(process.env.AI_HUB_GATEWAY_MAX_CONCURRENT || process.env.AI_HUB_MAX_CONCURRENT || 10)
+  });
 
   async function loadState() {
     if (state) return state;
@@ -48,6 +54,7 @@ export function createAiKernel(options = {}) {
       state.config ||= {};
       state.training ||= [];
       state.gatewayTokens ||= [];
+      state.gatewayUsage ||= {};
       state.config.routingMode ||= 'balanced';
       state.keys = state.keys.map(k => ({
         retryAt: 0,
@@ -57,7 +64,7 @@ export function createAiKernel(options = {}) {
         models: (k.models || []).filter(isChatCapableModel)
       }));
     } catch {
-      state = { keys: [], models: {}, memory: [], routing: {}, config: {}, training: [], gatewayTokens: [] };
+      state = { keys: [], models: {}, memory: [], routing: {}, config: {}, training: [], gatewayTokens: [], gatewayUsage: {} };
     }
     // Virtual local key only when user has not opted out (config.localKeyEnabled !== false)
     // and no local key exists yet. Do not recreate after explicit delete.
@@ -359,7 +366,7 @@ export function createAiKernel(options = {}) {
             requestId, provider: k.provider, model: result.model, keyId: k.id,
             appId: appId || 'hub-ui', responseLength: reply.length
           });
-          return { ...result, reply, provider: k.provider, keyId: k.id, requestId };
+          return { ...result, reply, provider: k.provider, keyId: k.id, requestId, usage: result.usage || null };
         } catch (err) {
           const messageSafe = safeError(err);
           const auth = err.status === 401 || err.status === 403;
@@ -395,6 +402,36 @@ export function createAiKernel(options = {}) {
         needsUserAction: true,
         requestId
       };
+    },
+
+    async embed({ input, provider, model, appId } = {}) {
+      const requestId = crypto.randomUUID();
+      const values = Array.isArray(input) ? input : [input];
+      if (!values.length || values.some(v => typeof v !== 'string' || !v.trim())) {
+        throw Object.assign(new Error('INPUT_REQUIRED'), { statusCode: 400 });
+      }
+      await loadState();
+      const now = Date.now();
+      let eligible = state.keys.filter(k => (k.status === 'ACTIVE' || (k.status === 'ERROR' && (!k.retryAt || k.retryAt <= now))) && (!provider || k.provider === provider));
+      if (!eligible.length) throw Object.assign(new Error('NO_ACTIVE_KEY'), { statusCode: 503 });
+      for (const k of eligible) {
+        const p = providers[k.provider];
+        if (!p) continue;
+        const chosen = model || k.selectedModel || k.models?.[0] || p.models?.[0];
+        if (!chosen) continue;
+        const token = k.provider === 'local' ? '' : await vault.get(k.id);
+        try {
+          const result = await embedProvider(p, token, chosen, values, fetchImpl);
+          return { ...result, model: result.model || chosen, provider: k.provider, keyId: k.id, requestId };
+        } catch (err) {
+          if (err.status === 401 || err.status === 403) k.status = 'INVALID';
+          else if (err.status === 429) { k.status = 'COOLDOWN'; k.retryAt = Date.now() + 60000; }
+          else k.status = 'ERROR';
+          k.lastError = safeError(err);
+          await saveState();
+        }
+      }
+      throw Object.assign(new Error('ALL_PROVIDERS_FAILED'), { statusCode: 503 });
     },
 
     keys: {
@@ -663,10 +700,11 @@ export function createAiKernel(options = {}) {
           status: t.appId ? 'bound' : 'unbound',
           appId: t.appId || null,
           createdAt: t.createdAt,
-          lastUsed: t.lastUsed || null
+          lastUsed: t.lastUsed || null,
+          limits: t.limits || null
         }));
       },
-      async createToken({ name, type = 'app' } = {}) {
+      async createToken({ name, type = 'app', limits = {} } = {}) {
         await loadState();
         const kind = type === 'shared' ? 'shared' : 'app';
         const raw = 'pah_' + crypto.randomBytes(24).toString('base64url');
@@ -680,7 +718,13 @@ export function createAiKernel(options = {}) {
           hash: crypto.createHash('sha256').update(raw).digest('hex'),
           createdAt: new Date().toISOString(),
           lastUsed: null,
-          _lastPersist: 0
+          _lastPersist: 0,
+          limits: {
+            perMinute: Number(limits.perMinute || process.env.AI_HUB_GATEWAY_RATE_LIMIT_PER_MIN || 60),
+            maxConcurrent: Number(limits.maxConcurrent || process.env.AI_HUB_GATEWAY_MAX_CONCURRENT || 10),
+            dailyTokens: Number(limits.dailyTokens || process.env.AI_HUB_GATEWAY_DAILY_TOKENS || 0),
+            monthlyTokens: Number(limits.monthlyTokens || process.env.AI_HUB_GATEWAY_MONTHLY_TOKENS || 0)
+          }
         };
         state.gatewayTokens = state.gatewayTokens || [];
         state.gatewayTokens.push(entry);
@@ -688,7 +732,7 @@ export function createAiKernel(options = {}) {
         await logger.write('gateway.token.created', 'info', { tokenId: id, name: entry.name, type: kind });
         return {
           id, name: entry.name, type: kind, status: 'unbound', appId: null,
-          token: raw, prefix: entry.prefix, createdAt: entry.createdAt
+          token: raw, prefix: entry.prefix, createdAt: entry.createdAt, limits: entry.limits
         };
       },
       async revokeToken(id) {
@@ -748,7 +792,62 @@ export function createAiKernel(options = {}) {
           appId: hit.appId || claimed || null,
           status: hit.appId ? 'bound' : 'unbound'
         };
-      }
+      },
+      async usage({ tokenId = null, appId = null } = {}) {
+        await loadState();
+        const all = Object.values(state.gatewayUsage || {});
+        const rows = all.filter(x => (!tokenId || x.tokenId === tokenId) && (!appId || x.appId === appId));
+        return rows.reduce((a, x) => ({
+          requests: a.requests + (x.requests || 0),
+          promptTokens: a.promptTokens + (x.promptTokens || 0),
+          completionTokens: a.completionTokens + (x.completionTokens || 0),
+          totalTokens: a.totalTokens + (x.totalTokens || 0),
+          errors: a.errors + (x.errors || 0)
+        }), { requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0 });
+      },
+      async acquire(raw, { appId = null } = {}) {
+        const ok = await this.validate(raw, { appId, bind: true });
+        if (!ok) return null;
+        await loadState();
+        const token = state.gatewayTokens.find(t => t.id === ok.id);
+        const limits = {
+          perMinute: Number(token?.limits?.perMinute || process.env.AI_HUB_GATEWAY_RATE_LIMIT_PER_MIN || 60),
+          maxConcurrent: Number(token?.limits?.maxConcurrent || process.env.AI_HUB_GATEWAY_MAX_CONCURRENT || 10),
+          dailyTokens: Number(token?.limits?.dailyTokens || 0),
+          monthlyTokens: Number(token?.limits?.monthlyTokens || 0)
+        };
+        const slot = gatewayRateLimiter.tryAcquire(ok.id);
+        if (!slot.ok) { const e = new Error(slot.reason || 'RATE_LIMIT'); e.statusCode = 429; e.retryAfter = slot.retryAfter; throw e; }
+        const nowTs = Date.now();
+        let window = gatewayWindows.get(ok.id);
+        if (!window || nowTs - window.startedAt >= 60_000) window = { startedAt: nowTs, timestamps: [], concurrent: 0 };
+        window.timestamps = window.timestamps.filter(t => nowTs - t < 60_000);
+        if (window.timestamps.length >= limits.perMinute || window.concurrent >= limits.maxConcurrent) {
+          slot.release(); const e = new Error(window.concurrent >= limits.maxConcurrent ? 'CONCURRENT_LIMIT' : 'RATE_LIMIT'); e.statusCode = 429; e.retryAfter = Math.max(1, Math.ceil((60_000 - (nowTs - (window.timestamps[0] || nowTs))) / 1000)); throw e;
+        }
+        window.timestamps.push(nowTs); window.concurrent += 1; gatewayWindows.set(ok.id, window);
+        const release = slot.release; slot.release = () => { release(); const w=gatewayWindows.get(ok.id); if(w) { w.concurrent=Math.max(0,w.concurrent-1); gatewayWindows.set(ok.id,w); } };
+        const day = new Date().toISOString().slice(0,10);
+        const month = day.slice(0,7);
+        const rows = Object.values(state.gatewayUsage || {});
+        const dayTokens = rows.filter(x => x.tokenId === ok.id && x.period === day).reduce((n,x)=>n+(x.totalTokens||0),0);
+        const monthTokens = rows.filter(x => x.tokenId === ok.id && x.period.startsWith(month)).reduce((n,x)=>n+(x.totalTokens||0),0);
+        if ((limits.dailyTokens && dayTokens >= limits.dailyTokens) || (limits.monthlyTokens && monthTokens >= limits.monthlyTokens)) { slot.release(); const e = new Error('USAGE_QUOTA_EXCEEDED'); e.statusCode=429; e.retryAfter=60; throw e; }
+        return { ...ok, slot, limits };
+      },
+      async recordUsage({ tokenId, appId = null, usage = null, error = false } = {}) {
+        if (!tokenId) return;
+        await loadState();
+        const day = new Date().toISOString().slice(0,10);
+        const id = `${tokenId}:${appId || 'default'}:${day}`;
+        const u = state.gatewayUsage[id] ||= { tokenId, appId: appId || null, period: day, requests: 0, promptTokens: 0, completionTokens: 0, totalTokens: 0, errors: 0 };
+        u.requests += 1;
+        if (error) u.errors += 1;
+        u.promptTokens += Number(usage?.prompt_tokens || 0);
+        u.completionTokens += Number(usage?.completion_tokens || 0);
+        u.totalTokens += Number(usage?.total_tokens || 0);
+        await saveState();
+      },
     },
 
     routing: {
@@ -863,3 +962,4 @@ function safeError(err) {
 
 export { createActionRegistry } from './actions.js';
 export { createJsonFileStore } from './store.js';
+

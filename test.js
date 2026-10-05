@@ -67,7 +67,8 @@ async function start(kernel) {
           for (const [k, v] of Object.entries(this.headers)) res.setHeader(k, v);
           res.end(JSON.stringify(obj));
         },
-        end(s) { res.statusCode = this.statusCode; res.end(s); }
+        write(s) { if (!this._chunks) this._chunks = []; this._chunks.push(String(s)); },
+        end(s) { res.statusCode = this.statusCode; for (const [k,v] of Object.entries(this.headers)) res.setHeader(k,v); if (this._chunks?.length) res.end(this._chunks.join('') + (s || '')); else res.end(s); }
       };
       runHandlers(route.handlers, fakeReq, fakeRes);
     });
@@ -136,7 +137,7 @@ assert.equal(localChat.status, 200);
 const stream = await httpJson(port, 'POST', '/v1/chat/completions', {
   model: 'auto', stream: true, messages: [{ role: 'user', content: 'x' }]
 });
-assert.equal(stream.status, 400);
+assert.equal(stream.status, 200); assert.match(stream.text, /data: \[DONE\]/);
 
 const tok = await kernel.gateway.createToken({ name: 'app-builder' });
 assert.equal((await httpJson(port, 'GET', '/v1/models')).status, 401);

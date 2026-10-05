@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import { createAiKernel, createActionRegistry, createJsonFileStore } from './ai-app-kernel/src/index.js';
 import { ensureOllama } from './start-ollama.js';
 import { mountOpenAICompat } from './openai-compat.js';
+import { createRateLimiter } from './ai-app-kernel/src/security.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
@@ -36,9 +37,11 @@ app.use((req, res, next) => {
   if (!origin) {
     // server-to-server: no CORS headers required
   } else if (ALLOWED_ORIGINS.length === 0) {
-    // Default: reflect request origin (SoloHost embeds / same LAN) without credentials wildcard
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Vary', 'Origin');
+    // Secure default: same-origin only. Cross-origin browser apps must explicitly configure AI_HUB_ALLOWED_ORIGINS.
+    let sameOrigin = false;
+    try { sameOrigin = new URL(origin).host === req.get('host'); } catch {}
+    if (sameOrigin) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
+    else if (req.method === 'OPTIONS') return res.status(403).end();
   } else if (ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.includes('*')) {
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
@@ -57,6 +60,52 @@ app.use((req, res, next) => {
 });
 
 app.use(express.json({ limit: '2mb' }));
+
+// SoloHost Feedback Hub — defaults embedded (env can override)
+const SHFH_DEFAULTS = {
+  hubId: process.env.SHFH_HUB_ID || 'SHFH-CANNOI-0905428801',
+  hubUrl: (process.env.SHFH_HUB_URL || 'http://14.176.78.46:8090').replace(/\/$/, ''),
+  ingestToken: process.env.SHFH_INGEST_TOKEN || 'cannoi_7Kp9xV2mQ8rN4tY6cL3wA5zD1eF0uH9',
+  appId: process.env.SHFH_APP_ID || 'personal-ai-hub',
+  appName: process.env.SHFH_APP_NAME || 'Personal AI Hub',
+  version: process.env.npm_package_version || '1.8.1',
+  enabled: process.env.SHFH_ENABLED !== '0'
+};
+app.get('/api/shfh-config', (_req, res) => {
+  const hubUrl = SHFH_DEFAULTS.hubUrl;
+  res.json({
+    hubId: SHFH_DEFAULTS.hubId,
+    hubUrl,
+    formUrl: hubUrl + '/feedback',
+    ingestToken: SHFH_DEFAULTS.ingestToken,
+    appId: SHFH_DEFAULTS.appId,
+    appName: SHFH_DEFAULTS.appName,
+    version: SHFH_DEFAULTS.version,
+    platform: 'solohost',
+    enabled: SHFH_DEFAULTS.enabled
+  });
+});
+app.post('/api/shfh-proxy', express.json({ limit: '32kb' }), async (req, res) => {
+  if (!SHFH_DEFAULTS.enabled) return res.status(503).json({ error: 'SHFH_DISABLED' });
+  const path = String(req.body?.path || '').replace(/^\/+/, '');
+  if (!path.startsWith('api/')) return res.status(400).json({ error: 'INVALID_PATH' });
+  try {
+    const r = await fetch(SHFH_DEFAULTS.hubUrl + '/' + path, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        Authorization: 'Bearer ' + SHFH_DEFAULTS.ingestToken
+      },
+      body: JSON.stringify(req.body?.payload || {})
+    });
+    const text = await r.text();
+    res.status(r.status).type('application/json').send(text || '{}');
+  } catch (e) {
+    res.status(502).json({ error: 'SHFH_PROXY_FAILED', message: String(e?.message || e) });
+  }
+});
+
 app.use(express.static(path.join(__dirname, 'public')));
 
 const schema = {
@@ -129,6 +178,7 @@ const ai = createAiKernel({
 const ADMIN_PASSWORD = String(process.env.AI_HUB_ADMIN_PASSWORD || '').trim();
 const sessions = new Map(); // sid -> { exp }
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const adminLoginLimiter = createRateLimiter({ perMinute: Number(process.env.AI_HUB_ADMIN_LOGIN_PER_MIN || 10), maxConcurrent: 2 });
 
 function parseCookies(req) {
   const raw = req.headers.cookie || '';
@@ -155,7 +205,9 @@ function requireAdmin(req, res, next) {
 }
 
 app.post('/api/v1/admin/login', express.json(), (req, res) => {
-  if (!ADMIN_PASSWORD) {
+  const slot = adminLoginLimiter.tryAcquire(req.ip || req.headers['x-forwarded-for'] || 'admin');
+  if (!slot.ok) { res.setHeader('Retry-After', String(slot.retryAfter || 60)); return res.status(429).json({ error: 'LOGIN_RATE_LIMIT', message: 'Too many login attempts. Try again later.' }); }
+  if (!ADMIN_PASSWORD) { slot.release();
     return res.json({ ok: true, mode: 'open', message: 'AI_HUB_ADMIN_PASSWORD not set — set it in SoloHost config to lock the admin UI' });
   }
   const password = String(req.body?.password || '');
@@ -165,6 +217,7 @@ app.post('/api/v1/admin/login', express.json(), (req, res) => {
   if (!ok) {
     return res.status(401).json({ error: 'INVALID_PASSWORD', message: 'Wrong admin password' });
   }
+  slot.release();
   const sid = crypto.randomBytes(24).toString('base64url');
   sessions.set(sid, { exp: Date.now() + SESSION_TTL_MS });
   const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
@@ -218,9 +271,9 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '1.6.2',
+    version: '1.7.1',
     openaiCompatible: true,
-    routes: ['GET /v1/models', 'POST /v1/chat/completions', 'GET /v1/health', 'GET /v1/__ping']
+    routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });
 });
 
@@ -257,7 +310,7 @@ app.get('/api/v1/gateway', (req, res) => {
   res.json({
     service: SERVICE_NAME,
     role: 'solohost-ai-gateway',
-    version: process.env.npm_package_version || '1.6.0',
+    version: process.env.npm_package_version || '1.7.1',
     openaiCompatible: true,
     defaultModel: 'auto',
     connections: {
@@ -288,11 +341,14 @@ app.get('/api/v1/gateway', (req, res) => {
     endpoints: {
       openaiModels: 'GET /v1/models',
       openaiChat: 'POST /v1/chat/completions',
+      openaiResponses: 'POST /v1/responses',
+      openaiEmbeddings: 'POST /v1/embeddings',
       openaiHealth: 'GET /v1/health',
       nativeChat: 'POST /api/v1/chat',
       health: 'GET /api/v1/health',
       gateway: 'GET /api/v1/gateway',
-      gatewayTokens: '/api/v1/gateway/tokens'
+      gatewayTokens: '/api/v1/gateway/tokens',
+      gatewayUsage: '/api/v1/gateway/usage'
     },
     auth: {
       header: 'Authorization: Bearer pah_…  OR  X-Personal-AI-Key: pah_…',
@@ -364,7 +420,7 @@ ensureOllama()
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Personal AI Hub listening on 0.0.0.0:${PORT}`);
-  console.log('OpenAI routes: GET /v1/models, POST /v1/chat/completions, GET /v1/health, GET /v1/__ping');
+  console.log('OpenAI routes: GET /v1/models, POST /v1/chat/completions, POST /v1/responses, POST /v1/embeddings, GET /v1/health, GET /v1/__ping');
   console.log(`Service DNS name: ${SERVICE_NAME}`);
   console.log(`Gateway discovery: http://${SERVICE_NAME}:${PORT}/api/v1/gateway`);
   if (PUBLIC_BASE_URL) console.log(`Public base URL: ${PUBLIC_BASE_URL}`);

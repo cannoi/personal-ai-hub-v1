@@ -181,7 +181,7 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
     });
     if (!r.ok) throw await providerError(r);
     const j = await r.json();
-    return { reply: j.message?.content || '', model: j.model || model };
+    return { reply: j.message?.content || '', model: j.model || model, usage: { prompt_tokens: Number(j.prompt_eval_count || 0), completion_tokens: Number(j.eval_count || 0), total_tokens: Number((j.prompt_eval_count || 0) + (j.eval_count || 0)) } };
   }
 
   if (provider.type === 'gemini') {
@@ -221,7 +221,7 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
       e.status = 400;
       throw e;
     }
-    return { reply, model };
+    return { reply, model, usage: { prompt_tokens: Number(j.usageMetadata?.promptTokenCount || 0), completion_tokens: Number(j.usageMetadata?.candidatesTokenCount || 0), total_tokens: Number(j.usageMetadata?.totalTokenCount || 0) } };
   }
 
   if (provider.type === 'anthropic') {
@@ -245,7 +245,8 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
     const j = await r.json();
     return {
       reply: (j.content || []).map(x => x.text || '').join(''),
-      model: j.model || model
+      model: j.model || model,
+      usage: { prompt_tokens: Number(j.usage?.input_tokens || 0), completion_tokens: Number(j.usage?.output_tokens || 0), total_tokens: Number((j.usage?.input_tokens || 0) + (j.usage?.output_tokens || 0)) }
     };
   }
 
@@ -262,8 +263,26 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
   const j = await r.json();
   return {
     reply: j.choices?.[0]?.message?.content || '',
-    model: j.model || model
+    model: j.model || model,
+    usage: { prompt_tokens: Number(j.usage?.prompt_tokens || 0), completion_tokens: Number(j.usage?.completion_tokens || 0), total_tokens: Number(j.usage?.total_tokens || 0) }
   };
+}
+
+export async function embedProvider(provider, token, model, input, fetchImpl = fetch) {
+  if (provider.type === 'ollama') {
+    const base = String(provider.baseUrl || '').replace(/\/$/, '');
+    const r = await fetchImpl(`${base}/api/embed`, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ model, input }), timeoutMs:90000 });
+    if (!r.ok) throw await providerError(r);
+    const j = await r.json();
+    return { object:'list', data:(j.embeddings || []).map((embedding,index)=>({object:'embedding',embedding,index})), usage:{prompt_tokens:0,total_tokens:0} , model};
+  }
+  if (provider.type === 'openai-compatible') {
+    const r = await fetchImpl(`${provider.baseUrl}/embeddings`, { method:'POST', headers:{'Content-Type':'application/json',Authorization:`Bearer ${token}`}, body:JSON.stringify({model,input}), timeoutMs:90000 });
+    if (!r.ok) throw await providerError(r);
+    const j = await r.json();
+    return { object:'list', data:j.data || [], usage:{ prompt_tokens:Number(j.usage?.prompt_tokens||0), completion_tokens:Number(j.usage?.completion_tokens||0), total_tokens:Number(j.usage?.total_tokens||0) }, model:j.model || model };
+  }
+  const e = new Error('EMBEDDINGS_UNSUPPORTED_FOR_PROVIDER'); e.statusCode=400; throw e;
 }
 
 async function providerError(r) {

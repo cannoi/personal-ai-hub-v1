@@ -1,12 +1,12 @@
 {
   "name": "personal-ai-hub",
-  "version": "1.7.1",
+  "version": "1.8.1",
   "type": "module",
-  "description": "Personal AI Hub — SoloHost AI Gateway with admin login",
+  "description": "Personal AI Hub \u2014 SoloHost AI Gateway with admin login",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node test.js && node test-security.js"
+    "test": "node test.js && node test-security.js && node test-gateway-upgrade.js"
   },
   "dependencies": {
     "express": "^4.19.2"
