@@ -138,8 +138,8 @@ export function createLocalModelManager(provider, fetchImpl = fetch) {
           retryAfterMs: backoff,
           suggested: SUGGESTED_LOCAL_MODELS,
           hint: starting
-            ? 'Ollama container is still starting. Wait 1–2 minutes then Refresh.'
-            : 'Cannot reach Ollama (http://ollama:11434). Check: (1) ollama service is running in the same stack, (2) image is not 0 bytes — re-pull ollama/ollama:0.6.8, (3) both services share network solohost. Cloud providers keep working.'
+            ? 'Managed Ollama is still starting inside the Hub container. Wait 1–2 minutes then Refresh.'
+            : 'Cannot reach managed Ollama at http://127.0.0.1:11434 inside the Hub container. Rebuild/redeploy so docker-entrypoint or start-ollama.js can run `ollama serve`. Cloud providers keep working.'
         };
       }
     },

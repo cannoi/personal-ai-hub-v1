@@ -35,4 +35,7 @@ else
 fi
 
 echo "[hub] Starting Personal AI Hub on 0.0.0.0:${PORT:-8080}"
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
 exec node index.js

@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { mkdir } from 'node:fs/promises';
 import { createAiKernel, createActionRegistry, createJsonFileStore } from './ai-app-kernel/src/index.js';
+import { ensureOllama } from './start-ollama.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.PORT || 8080);
@@ -247,6 +248,13 @@ const runHealthCheck = async () => {
 // First run after 60s (not 2s) to avoid startup storm
 setTimeout(runHealthCheck, 60_000);
 setInterval(runHealthCheck, HEALTH_INTERVAL_MS).unref();
+
+// Managed Local AI: start Ollama in-process if not already up (SoloHost-safe)
+const ollamaBoot = await ensureOllama().catch((err) => {
+  console.warn('[hub] ensureOllama failed:', err?.message || err);
+  return { ok: false, error: String(err?.message || err) };
+});
+console.log('[hub] Ollama boot status:', JSON.stringify(ollamaBoot));
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Personal AI Hub listening on 0.0.0.0:${PORT}`);

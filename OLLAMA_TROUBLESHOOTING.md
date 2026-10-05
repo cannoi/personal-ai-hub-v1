@@ -1,26 +1,17 @@
-# Managed Local AI (same-container Ollama)
+# Managed Local AI troubleshooting
 
-From v1.5.0, Ollama runs **inside** the Personal AI Hub container via `docker-entrypoint.sh`.
-
-- No separate `ollama/ollama` image (avoids 0-byte sidecar pulls on SoloHost)
-- No docker.sock, no host `apt install`
-- Models: volume `/app/ollama-data` (`personal-ai-ollama-data`)
-
-## After deploy
-
-1. Wait ~1 minute for first boot (entrypoint starts `ollama serve`).
-2. UI → Local AI → **Refresh** → Ready.
-3. Download `qwen3:4b` (or another light model).
-
-## Logs to check
-
-```bash
-docker logs personal-ai-hub 2>&1 | head -50
-# Expect: [hub] Starting managed Ollama … / [hub] Ollama is ready
+## Expected logs after deploy
+```
+[hub] Starting managed Ollama: /usr/local/bin/ollama serve ...
+[hub] Ollama is ready
+[hub] Ollama boot status: {"ok":true,...}
 ```
 
-## If still Unavailable
+## If still "Cannot reach Ollama"
+1. Rebuild: `docker compose build --no-cache && docker compose up -d`
+2. Confirm binary: `docker exec personal-ai-hub ollama --version`
+3. Confirm API: `docker exec personal-ai-hub wget -qO- http://127.0.0.1:11434/api/tags`
+4. Architecture must be **amd64** or **arm64** (Ollama does not support 32-bit armv7)
+5. Wait 1–2 minutes after boot on slow Pi hardware
 
-- Rebuild image so binary is included: `docker compose build --no-cache && docker compose up -d`
-- Ensure volume `personal-ai-ollama-data` is writable
-- Cloud providers continue to work regardless
+Cloud providers are independent of Ollama.

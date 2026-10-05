@@ -17,7 +17,7 @@ RUN set -eux; \
   case "$arch" in \
     amd64|x86_64) arch=amd64 ;; \
     arm64|aarch64) arch=arm64 ;; \
-    *) echo "Unsupported arch: $arch"; exit 1 ;; \
+    *) echo "WARN: unsupported arch $arch for Ollama — Local AI disabled"; exit 0 ;; \
   esac; \
   curl -fsSL -o /tmp/ollama.tgz \
     "https://github.com/ollama/ollama/releases/download/v0.6.8/ollama-linux-${arch}.tgz"; \
@@ -28,11 +28,10 @@ RUN set -eux; \
   elif [ -f /tmp/ollama-extract/ollama ]; then \
     mv /tmp/ollama-extract/ollama /usr/local/bin/ollama; \
   else \
-    # flat binary payload
     find /tmp/ollama-extract -type f -name ollama -exec mv {} /usr/local/bin/ollama \; ; \
   fi; \
   chmod +x /usr/local/bin/ollama; \
-  ollama --version; \
+  /usr/local/bin/ollama --version || true; \
   rm -rf /tmp/ollama.tgz /tmp/ollama-extract
 
 COPY package*.json ./
@@ -58,3 +57,5 @@ HEALTHCHECK --interval=30s --timeout=8s --start-period=60s --retries=5 \
   CMD wget -qO- http://127.0.0.1:8080/health || exit 1
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
+# Fallback if platform strips ENTRYPOINT:
+CMD ["node", "index.js"]
