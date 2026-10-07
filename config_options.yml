@@ -1,7 +1,7 @@
 title: "Personal AI Hub"
 eyebrow: SoloHost AI Gateway
 description: "Personal AI Gateway with Local AI, multi-provider routing, and secure app access."
-footer_hint: "Only enter your Admin access password. AI providers and other settings are managed inside Personal AI Hub."
+footer_hint: "Admin password is required for the control plane. Optional network fields help other SoloHost apps find this Hub."
 output_file: .env
 
 fields:
@@ -10,3 +10,15 @@ fields:
     type: password
     preserve_if_blank: true
     help: "Required to access Hub administration. Use at least 16 characters and keep it private."
+
+  - name: HOST_PORT
+    label: Published host port (optional)
+    type: text
+    preserve_if_blank: true
+    help: "SoloHost mapped port for this app (e.g. 62117). Lets discovery advertise http://host.docker.internal:PORT/v1 when Docker DNS fails."
+
+  - name: PUBLIC_BASE_URL
+    label: Public base URL (optional)
+    type: text
+    preserve_if_blank: true
+    help: "If you reach the Hub via a fixed URL (e.g. http://192.168.1.10:62117), set it here so App Builder can use the same base + /v1."

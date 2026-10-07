@@ -69,7 +69,7 @@ const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-m
 const feedbackService = createFeedbackService({
   appId: 'personal-ai-hub',
   appName: 'Personal AI Hub',
-  version: '1.8.9'
+  version: '1.8.10'
 });
 mountFeedbackRoutes(app, feedbackService);
 
@@ -241,7 +241,7 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '1.8.9',
+    version: '1.8.10',
     openaiCompatible: true,
     routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });
@@ -268,45 +268,114 @@ app.get('/health', async (_req, res) => {
 });
 
 /**
+ * Build reachable OpenAI base URLs for SoloHost apps.
+ * Priority: request Host (always works for the caller) → PUBLIC_BASE_URL → Docker DNS → host-gateway.
+ */
+function resolveConnectionBases(req) {
+  const hostHeader = (req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim();
+  const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
+  const requestBase = hostHeader ? `${proto}://${hostHeader}` : null;
+
+  // Published host port (SoloHost random map e.g. 62117). Prefer explicit env.
+  let publishedPort = process.env.HOST_PORT || process.env.SOLOHOST_HOST_PORT || null;
+  if (!publishedPort && hostHeader && hostHeader.includes(':')) {
+    const maybe = hostHeader.split(':').pop();
+    if (/^\d+$/.test(maybe) && maybe !== String(PORT)) publishedPort = maybe;
+  }
+  if (!publishedPort && hostHeader && !hostHeader.includes(':')) {
+    // default http/https — still unknown published port
+    publishedPort = null;
+  }
+
+  const dockerBase = `http://${SERVICE_NAME}:${PORT}`;
+  const dockerAliases = [
+    dockerBase,
+    `http://personal-ai-hub:${PORT}`,
+    `http://personal_ai_hub:${PORT}`
+  ];
+
+  const hostGatewayBases = [];
+  if (publishedPort) {
+    for (const h of ['host.docker.internal', 'host.containers.internal', '172.17.0.1']) {
+      hostGatewayBases.push(`http://${h}:${publishedPort}`);
+    }
+  }
+
+  const externalBase = PUBLIC_BASE_URL || null;
+
+  // Prefer what the current caller already used successfully
+  const ordered = [];
+  if (requestBase) ordered.push(requestBase);
+  if (externalBase) ordered.push(externalBase);
+  ordered.push(...dockerAliases);
+  ordered.push(...hostGatewayBases);
+
+  const unique = [...new Set(ordered.filter(Boolean))];
+  return {
+    requestBase,
+    dockerBase,
+    publishedPort,
+    externalBase,
+    bases: unique,
+    openaiBases: unique.map(b => `${b.replace(/\/$/, '')}/v1`)
+  };
+}
+
+/**
  * Discovery document for SoloHost apps (App Builder, etc.).
  * NEVER returns HTML — always JSON.
  */
 app.get('/api/v1/gateway', (req, res) => {
-  const hostPort = process.env.HOST_PORT || '18080';
-  const dockerBase = `http://${SERVICE_NAME}:8080`;
-  const hostBase = `http://172.17.0.1:${hostPort}`;
-  const externalBase = PUBLIC_BASE_URL || null;
-  const primary = PUBLIC_BASE_URL || dockerBase;
+  const c = resolveConnectionBases(req);
+  const primaryOpenai = c.openaiBases[0];
+  const dockerOpenai = `${c.dockerBase}/v1`;
   res.json({
     service: SERVICE_NAME,
     role: 'solohost-ai-gateway',
-    version: process.env.npm_package_version || '1.8.5',
+    version: process.env.npm_package_version || '1.8.9',
     openaiCompatible: true,
     defaultModel: 'auto',
+    /** Primary URL that worked for THIS request — copy into App Builder first */
+    primaryOpenaiBaseUrl: primaryOpenai,
     connections: {
+      thisRequest: c.requestBase ? {
+        baseUrl: c.requestBase,
+        openaiBaseUrl: `${c.requestBase}/v1`,
+        note: 'Use this when the client can reach the same Host you used to open the Hub UI (SoloHost published port / reverse proxy).'
+      } : null,
       docker: {
-        baseUrl: dockerBase,
-        openaiBaseUrl: `${dockerBase}/v1`,
-        note: 'Use from other SoloHost containers on the same Docker network'
+        baseUrl: c.dockerBase,
+        openaiBaseUrl: dockerOpenai,
+        aliases: ['personal-ai-hub', 'personal_ai_hub', SERVICE_NAME],
+        note: 'Only works when the caller shares a Docker network with this Hub (DNS must resolve).'
       },
-      host: {
-        baseUrl: hostBase,
-        openaiBaseUrl: `${hostBase}/v1`,
-        note: 'Docker bridge gateway — for containers that cannot resolve service DNS'
+      hostGateway: c.publishedPort ? {
+        baseUrl: `http://host.docker.internal:${c.publishedPort}`,
+        openaiBaseUrl: `http://host.docker.internal:${c.publishedPort}/v1`,
+        alternatives: [
+          `http://host.containers.internal:${c.publishedPort}/v1`,
+          `http://172.17.0.1:${c.publishedPort}/v1`
+        ],
+        note: 'Use from another container when Docker DNS personal-ai-hub fails. Never use 127.0.0.1 from inside a container.'
+      } : {
+        note: 'Set HOST_PORT to the SoloHost published port if Docker DNS fails.'
       },
-      ...(externalBase ? {
+      ...(c.externalBase ? {
         external: {
-          baseUrl: externalBase,
-          openaiBaseUrl: `${externalBase}/v1`,
-          note: 'Advertised PUBLIC_BASE_URL (browser / WAN). Not a bind address.'
+          baseUrl: c.externalBase,
+          openaiBaseUrl: `${c.externalBase}/v1`,
+          note: 'PUBLIC_BASE_URL / AI_HUB_PUBLIC_URL'
         }
       } : {})
     },
     recommended: {
-      serverToServer: `${dockerBase}/v1`,
-      browser: externalBase ? `${externalBase}/v1` : `${hostBase}/v1`,
-      external: externalBase ? `${externalBase}/v1` : null,
-      nativeChat: `${dockerBase}/api/v1/chat`
+      /** Try in this order from App Builder / other apps */
+      tryInOrder: c.openaiBases,
+      serverToServer: c.requestBase ? `${c.requestBase}/v1` : dockerOpenai,
+      dockerDns: dockerOpenai,
+      hostGateway: c.publishedPort ? `http://host.docker.internal:${c.publishedPort}/v1` : null,
+      browser: c.requestBase ? `${c.requestBase}/v1` : (c.externalBase ? `${c.externalBase}/v1` : null),
+      nativeChat: c.requestBase ? `${c.requestBase}/api/v1/chat` : `${c.dockerBase}/api/v1/chat`
     },
     endpoints: {
       openaiModels: 'GET /v1/models',
@@ -314,6 +383,7 @@ app.get('/api/v1/gateway', (req, res) => {
       openaiResponses: 'POST /v1/responses',
       openaiEmbeddings: 'POST /v1/embeddings',
       openaiHealth: 'GET /v1/health',
+      openaiDiscovery: 'GET /v1',
       nativeChat: 'POST /api/v1/chat',
       health: 'GET /api/v1/health',
       gateway: 'GET /api/v1/gateway',
@@ -322,17 +392,46 @@ app.get('/api/v1/gateway', (req, res) => {
     },
     auth: {
       header: 'Authorization: Bearer pah_…  OR  X-Personal-AI-Key: pah_…',
+      appIdHeader: 'X-SoloHost-App-ID: your-app-id',
       createToken: 'POST /api/v1/gateway/tokens'
     },
     example: {
-      curl: `curl -s ${dockerBase}/v1/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer pah_YOUR_TOKEN" -H "X-SoloHost-App-ID: app-builder" -d '{"model":"auto","messages":[{"role":"user","content":"hello"}]}'`
+      curl: `curl -s ${primaryOpenai}/models -H "Authorization: Bearer pah_YOUR_TOKEN"`,
+      chat: `curl -s ${primaryOpenai}/chat/completions -H "Content-Type: application/json" -H "Authorization: Bearer pah_YOUR_TOKEN" -H "X-SoloHost-App-ID: app-builder" -d '{"model":"auto","messages":[{"role":"user","content":"hello"}]}'`
+    },
+    troubleshooting: {
+      hostNotFound: 'DNS name personal-ai-hub only resolves on a shared Docker network. Prefer the SoloHost published URL (thisRequest) or host.docker.internal:HOST_PORT.',
+      loopbackFails: 'http://127.0.0.1:PORT from another container points at THAT container, not the Hub. Use host.docker.internal or Docker DNS.',
+      wrongPath: 'Base URL must end with /v1 (OpenAI-compatible). Paths are /v1/models and /v1/chat/completions.'
     },
     notes: [
       'Provider API keys stay in the Hub vault; apps only use pah_ gateway tokens.',
       'Managed Ollama runs inside the Hub container — apps never call Ollama directly.',
-      'model=auto uses Hub smart routing (routing mode + health + fallback).',
+      'model=auto uses Hub Fast Smart Router (routing mode + health + fallback).',
       'Do not use http://127.0.0.1 from another container.'
     ]
+  });
+});
+
+/** OpenAI base path discovery — clients that open only /v1 get JSON, not SPA HTML */
+app.get(['/v1', '/v1/'], (req, res) => {
+  const c = resolveConnectionBases(req);
+  res.json({
+    object: 'hub.discovery',
+    service: SERVICE_NAME,
+    openaiCompatible: true,
+    defaultModel: 'auto',
+    primaryOpenaiBaseUrl: c.openaiBases[0],
+    tryInOrder: c.openaiBases,
+    endpoints: {
+      models: 'GET /v1/models',
+      chat: 'POST /v1/chat/completions',
+      responses: 'POST /v1/responses',
+      embeddings: 'POST /v1/embeddings',
+      health: 'GET /v1/health'
+    },
+    auth: 'Authorization: Bearer pah_…',
+    gateway: '/api/v1/gateway'
   });
 });
 

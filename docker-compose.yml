@@ -1,15 +1,27 @@
+# Personal AI Hub — SoloHost AI Gateway
+# Other apps call OpenAI-compatible API at http://<reachable-host>/v1
+# DNS "personal-ai-hub" only works when the caller joins the same Docker network.
+
 services:
   personal-ai-hub:
     image: ghcr.io/cannoi/personal-ai-hub-v1:latest
     pull_policy: always
     restart: unless-stopped
+    container_name: personal-ai-hub
     hostname: personal-ai-hub
     labels:
       pi.ui.primary: "true"
+      pi.ai.gateway: "true"
+      pi.ai.openai_path: "/v1"
     ports:
+      # SoloHost maps a host port → 8080. Use that host port (or host.docker.internal:PORT) from other containers.
       - "8080"
     environment:
       AI_HUB_ADMIN_PASSWORD: "${AI_HUB_ADMIN_PASSWORD}"
+      # Optional: set to the SoloHost published host port so discovery can advertise host.docker.internal:PORT
+      HOST_PORT: "${HOST_PORT:-}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
+      AI_HUB_PUBLIC_URL: "${AI_HUB_PUBLIC_URL:-}"
       PORT: "8080"
       SERVICE_NAME: "personal-ai-hub"
       DATA_DIR: "/app/data"
@@ -21,6 +33,12 @@ services:
     volumes:
       - personal-ai-hub-data:/app/data
       - personal-ai-ollama-data:/app/ollama-data
+    networks:
+      default:
+        aliases:
+          - personal-ai-hub
+          - personal_ai_hub
+          - ai-hub
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
       interval: 30s
