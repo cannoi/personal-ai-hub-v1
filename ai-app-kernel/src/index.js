@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import { mountKernel } from './http.js';
 import { createSecretVault } from './vault.js';
 import { createActivityLogger } from './logger.js';
-import { providerCatalog, listModels, chatProvider, embedProvider, isChatCapableModel, rankChatModels } from './providers.js';
+import { providerCatalog, listModels, chatProvider, embedProvider, isChatCapableModel, rankChatModels, classifyProviderError, adaptiveTimeoutMs, adaptiveNumPredict } from './providers.js';
 import { createLocalModelManager } from './local.js';
 import { createRateLimiter } from './security.js';
 
@@ -119,23 +119,124 @@ export function createAiKernel(options = {}) {
   });
   const providerInfo = p => ({ id: p.id, name: p.name, type: p.type, baseUrl: p.baseUrl, defaultModels: p.models || [] });
 
-  function keyRank(a, b) {
-    return (a.useCount || 0) - (b.useCount || 0)
-      || String(a.lastUsed || '').localeCompare(String(b.lastUsed || ''))
-      || String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+  function routeKey(keyId, model) {
+    return `${keyId}::${model || '*'}`;
   }
 
-  function rankModels(list, preferred = null) {
-    return rankChatModels(list, preferred);
+  function getRouteMetric(keyId, model) {
+    state.routing = state.routing || {};
+    state.routing.metrics = state.routing.metrics || {};
+    const id = routeKey(keyId, model);
+    if (!state.routing.metrics[id]) {
+      state.routing.metrics[id] = {
+        success: 0, failure: 0, totalLatencyMs: 0, lastSuccessAt: 0,
+        consecutiveFailures: 0, cooldownUntil: 0, lastErrorClass: null
+      };
+    }
+    return state.routing.metrics[id];
   }
+
+  function recordRouteSuccess(keyId, model, latencyMs) {
+    const m = getRouteMetric(keyId, model);
+    m.success += 1;
+    m.totalLatencyMs += Math.max(0, latencyMs || 0);
+    m.lastSuccessAt = Date.now();
+    m.consecutiveFailures = 0;
+    m.cooldownUntil = 0;
+    m.lastErrorClass = null;
+  }
+
+  function recordRouteFailure(keyId, model, errorClass, scope) {
+    const m = getRouteMetric(keyId, model);
+    m.failure += 1;
+    m.consecutiveFailures = (m.consecutiveFailures || 0) + 1;
+    m.lastErrorClass = errorClass;
+    const now = Date.now();
+    // Model-level circuit breaker; key-wide handled via key.status
+    if (errorClass === 'MODEL_429' || errorClass === 'UPSTREAM_429') {
+      m.cooldownUntil = now + 45_000;
+    } else if (errorClass === 'TIMEOUT') {
+      m.cooldownUntil = now + 20_000;
+    } else if (errorClass === 'MODEL_UNAVAILABLE') {
+      m.cooldownUntil = now + 120_000;
+    } else if (m.consecutiveFailures >= 3) {
+      m.cooldownUntil = now + 30_000;
+    }
+  }
+
+  function routeHealthScore(keyId, model) {
+    const m = getRouteMetric(keyId, model);
+    const now = Date.now();
+    if (m.cooldownUntil && m.cooldownUntil > now) return -1e9;
+    const attempts = m.success + m.failure;
+    const successRate = attempts ? m.success / attempts : 0.5;
+    const avgLat = m.success ? (m.totalLatencyMs / m.success) : 15000;
+    const stickyBoost = m.lastSuccessAt ? Math.max(0, 1 - (now - m.lastSuccessAt) / 3_600_000) : 0;
+    // Higher is better: success rate, recency, lower latency
+    return successRate * 100 + stickyBoost * 40 - Math.min(avgLat, 60000) / 1000 - m.consecutiveFailures * 15;
+  }
+
+  function keyRank(a, b) {
+    // Prefer keys with healthy sticky model + high success rate (not raw useCount)
+    const scoreA = routeHealthScore(a.id, a.selectedModel) + (a.status === 'ACTIVE' ? 10 : 0);
+    const scoreB = routeHealthScore(b.id, b.selectedModel) + (b.status === 'ACTIVE' ? 10 : 0);
+    if (scoreB !== scoreA) return scoreB - scoreA;
+    // Fewer consecutive key failures first
+    const fa = a.consecutiveFailures || 0;
+    const fb = b.consecutiveFailures || 0;
+    if (fa !== fb) return fa - fb;
+    return String(a.createdAt || '').localeCompare(String(b.createdAt || ''));
+  }
+
+  function rankModels(list, preferred = null, keyId = null) {
+    const uniq = [];
+    const seen = new Set();
+    for (const m of list || []) {
+      const id = String(m || '').trim();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      uniq.push(id);
+    }
+    // Drop models currently in circuit-breaker cooldown
+    const now = Date.now();
+    const live = keyId
+      ? uniq.filter(m => {
+          const met = getRouteMetric(keyId, m);
+          return !(met.cooldownUntil && met.cooldownUntil > now);
+        })
+      : uniq;
+    const base = live.length ? live : uniq;
+    // Prefer sticky success then free/cheap rank
+    return rankChatModels(base, preferred);
+  }
+
+  function normalizeAssistantReply(text) {
+    let s = String(text || '').trim();
+    if (!s) return s;
+    // Strip accidental internal router JSON if model echoed it
+    if (/^\{\s*"route"\s*:/.test(s) || /^\{\s*"provider"\s*:/.test(s)) {
+      try {
+        const j = JSON.parse(s);
+        if (j && typeof j.reply === 'string' && j.reply.trim()) return j.reply.trim();
+      } catch {}
+    }
+    // Never surface App Builder branding from Hub assistant
+    s = s.replace(/\bApp Builder\b/gi, 'this SoloHost app');
+    return s;
+  }
+
 
   async function chooseKeys(provider, model, allowProviderFallback = true) {
     await loadState();
     const now = Date.now();
     const mode = state.config?.routingMode || 'balanced';
-    const usable = k =>
-      (k.status === 'ACTIVE' || (k.status === 'ERROR' && (k.models || []).length > 0 && (!k.retryAt || k.retryAt <= now)))
-      && (!k.retryAt || k.retryAt <= now || k.status === 'ACTIVE');
+    const usable = k => {
+      if (k.status === 'BILLING_REQUIRED' || k.status === 'INVALID') return false;
+      if (k.retryAt && k.retryAt > now && k.status !== 'ACTIVE') return false;
+      return k.status === 'ACTIVE'
+        || (k.status === 'ERROR' && (k.models || []).length > 0 && (!k.retryAt || k.retryAt <= now))
+        || (k.status === 'COOLDOWN' && (!k.retryAt || k.retryAt <= now));
+    };
 
     let pool = state.keys.filter(usable);
     // Routing policies
@@ -206,6 +307,7 @@ export function createAiKernel(options = {}) {
       const requestId = crypto.randomUUID();
       if (!message?.trim()) throw Object.assign(new Error('MESSAGE_REQUIRED'), { statusCode: 400 });
 
+      const requestStartedAt = Date.now();
       await logger.write('chat.request', 'info', {
         requestId, provider, model, appId: appId || 'hub-ui', messageLength: String(message).length
       });
@@ -247,7 +349,12 @@ export function createAiKernel(options = {}) {
       }
 
       await loadState();
-      const memories = state.memory.slice(-10).map(x => `${x.role}: ${x.content}`).join('\n');
+      const memApp = appId || 'hub-ui';
+      const memories = (state.memory || [])
+        .filter(x => (x.appId || 'hub-ui') === memApp)
+        .slice(-8)
+        .map(x => `${x.role}: ${x.content}`)
+        .join('\n');
       const appKnowledge = (typeof knowledge === 'string' && knowledge.trim())
         ? knowledge.trim()
         : '';
@@ -277,8 +384,12 @@ export function createAiKernel(options = {}) {
         if (discovered.length) candidates.push(...discovered);
         else candidates.push(...(p.models || []));
         const stickyOk = preferred && (!discovered.length || discovered.includes(preferred));
-        candidates = rankModels(candidates, stickyOk ? preferred : null);
+        candidates = rankModels(candidates, stickyOk ? preferred : null, k.id);
         if (modelOnKey) candidates = [model, ...candidates.filter(m => m !== model)];
+        // Fast path: sticky healthy model first, then at most 2 alternates
+        if (stickyOk && preferred) {
+          candidates = [preferred, ...candidates.filter(m => m !== preferred)];
+        }
 
         if (!candidates.length) {
           failures.push({ provider: k.provider, reason: 'NO_MODEL' });
@@ -293,7 +404,9 @@ export function createAiKernel(options = {}) {
           let result = null;
           let lastModelError = null;
           let quotaHits = 0;
-          const maxTry = Math.min(candidates.length, 8);
+          const seenFingerprints = new Set();
+          // Fast Smart Router: try sticky + few alternates, not the whole catalog
+          const maxTry = Math.min(candidates.length, k.provider === 'local' ? 2 : 3);
           for (let i = 0; i < maxTry; i++) {
             chosen = candidates[i];
             try {
@@ -317,43 +430,51 @@ export function createAiKernel(options = {}) {
               break;
             } catch (candidateErr) {
               lastModelError = candidateErr;
-              // Auth / billing on the KEY — stop this key entirely.
-              if (candidateErr.status === 401 || candidateErr.status === 403) throw candidateErr;
-              // Local CPU timeout: keep trying other models/keys; do not treat as auth failure.
-              if (/REQUEST_TIMEOUT/i.test(String(candidateErr.message || '')) || candidateErr.status === 504) {
+              const cls = classifyProviderError(candidateErr);
+              const fingerprint = `${k.provider}|${k.id}|${chosen}|${cls.class}`;
+              if (seenFingerprints.has(fingerprint)) continue;
+              seenFingerprints.add(fingerprint);
+              recordRouteFailure(k.id, chosen, cls.class, cls.scope);
+
+              // Key-wide: stop this key immediately (no more models on same key)
+              if (cls.scope === 'key' || cls.class === 'INVALID' || cls.class === 'BILLING_REQUIRED') {
+                candidateErr.status = cls.class === 'BILLING_REQUIRED' ? 402 : (candidateErr.status || 401);
+                candidateErr.errorClass = cls.class;
+                throw candidateErr;
+              }
+
+              if (cls.class === 'TIMEOUT') {
                 await logger.write('model.unavailable', 'warn', {
                   requestId, provider: k.provider, model: chosen, keyId: k.id,
-                  status: 504, suggestedModel: null, error: safeError(candidateErr)
+                  status: 504, suggestedModel: null, error: safeError(candidateErr), errorClass: cls.class
                 });
-                continue;
+                // Fail this key fast on timeout — try next key/route
+                throw candidateErr;
               }
-              if (candidateErr.status === 402) throw candidateErr;
 
-              // 429 is often PER-MODEL on free tiers (Gemini). Keep trying cheaper models
-              // instead of locking the whole key like the previous buggy path.
-              if (candidateErr.status === 429) {
+              if (cls.class === 'MODEL_429' || cls.class === 'UPSTREAM_429' || candidateErr.status === 429) {
                 quotaHits += 1;
+                // Cooldown model only — keep key ACTIVE for other models
                 k.models = (k.models || []).filter(m => m !== chosen);
                 await logger.write('model.quota', 'warn', {
                   requestId, provider: k.provider, model: chosen, keyId: k.id,
-                  status: 429, error: safeError(candidateErr)
+                  status: 429, error: safeError(candidateErr), errorClass: cls.class
                 });
                 continue;
               }
 
-              // 404 / empty / transient: rotate model, parse Gemini "use models/X" hint.
               const suggested = extractModelHint(candidateErr.message || candidateErr.body || '');
               if (suggested && isChatCapableModel(suggested) && !candidates.includes(suggested)) {
                 candidates.push(suggested);
               }
-              if (candidateErr.status === 404) {
+              if (cls.class === 'MODEL_UNAVAILABLE' || candidateErr.status === 404) {
                 k.models = (k.models || []).filter(m => m !== chosen);
               }
               await logger.write('model.unavailable', 'warn', {
                 requestId, provider: k.provider, model: chosen, keyId: k.id,
-                status: candidateErr.status || null, suggestedModel: suggested || null, error: safeError(candidateErr)
+                status: candidateErr.status || null, suggestedModel: suggested || null,
+                error: safeError(candidateErr), errorClass: cls.class
               });
-              // If user forced a specific model, don't silently rotate away from it more than once.
               if (model && chosen === model && candidateErr.status !== 404) throw candidateErr;
             }
           }
@@ -367,14 +488,17 @@ export function createAiKernel(options = {}) {
             throw lastModelError || new Error('PROVIDER_NO_USABLE_MODEL');
           }
 
-          const reply = String(result.reply || '').trim();
+          const reply = normalizeAssistantReply(String(result.reply || '').trim());
           const now = new Date().toISOString();
+          const latencyMs = Date.now() - (requestStartedAt || Date.now());
+          recordRouteSuccess(k.id, result.model || chosen, latencyMs);
           k.lastUsed = now;
           k.lastError = null;
           k.status = 'ACTIVE';
           k.useCount = (k.useCount || 0) + 1;
           k.retryAt = 0;
-          // Sticky preferred model (pinode-telegram rememberGeminiSuccess)
+          k.consecutiveFailures = 0;
+          // Sticky preferred model — strong priority next request
           k.selectedModel = result.model || chosen;
           if (result.model && isChatCapableModel(result.model)) {
             k.models = rankModels([result.model, ...(k.models || [])], result.model);
@@ -407,24 +531,40 @@ export function createAiKernel(options = {}) {
           return { ...result, reply, provider: k.provider, keyId: k.id, requestId, usage: result.usage || null };
         } catch (err) {
           const messageSafe = safeError(err);
-          const auth = err.status === 401 || err.status === 403;
-          if (auth) { k.status = 'INVALID'; k.retryAt = 0; }
-          else if (err.status === 402) { k.status = 'BILLING_REQUIRED'; k.retryAt = 0; }
-          else if (err.status === 429) { k.status = 'COOLDOWN'; k.retryAt = Date.now() + 60_000; }
-          else if (err.status === 404) { k.status = 'MODEL_UNAVAILABLE'; k.retryAt = 0; }
-          else {
-            // Keep discovered models on transient/network errors so the UI still shows them
-            // and auto-retry / rotation can use this key after cooldown.
+          const cls = classifyProviderError(err);
+          if (cls.class === 'INVALID') {
+            k.status = 'INVALID'; k.retryAt = 0;
+          } else if (cls.class === 'BILLING_REQUIRED') {
+            k.status = 'BILLING_REQUIRED'; k.retryAt = 0;
+          } else if (cls.class === 'MODEL_429' || cls.class === 'UPSTREAM_429') {
+            // Keep key ACTIVE — model already cooled down in metrics
+            k.status = 'ACTIVE';
+            k.retryAt = 0;
+          } else if (cls.class === 'TIMEOUT') {
+            k.status = 'ERROR';
+            k.retryAt = Date.now() + 20_000;
+            k.consecutiveFailures = (k.consecutiveFailures || 0) + 1;
+          } else if (cls.class === 'MODEL_UNAVAILABLE' || err.status === 404) {
+            // Model-level; key stays usable for other models
+            k.status = 'ACTIVE';
+            k.retryAt = 0;
+          } else {
             k.status = 'ERROR';
             k.retryAt = Date.now() + 15_000;
+            k.consecutiveFailures = (k.consecutiveFailures || 0) + 1;
           }
           k.lastError = messageSafe;
           k.lastChecked = new Date().toISOString();
-          failures.push({ provider: k.provider, model: chosen, reason: messageSafe, status: err.status || null });
+          failures.push({
+            provider: k.provider, model: chosen, reason: messageSafe,
+            status: err.status || null, errorClass: cls.class
+          });
           await logger.write('provider.chat.failed', 'error', {
-            requestId, provider: k.provider, model: chosen, keyId: k.id, error: messageSafe, status: err.status || null
+            requestId, provider: k.provider, model: chosen, keyId: k.id,
+            error: messageSafe, status: err.status || null, errorClass: cls.class
           });
           await saveState();
+          // Key-wide billing/auth: skip remaining keys of same provider with same fingerprint? continue to next key
         }
       }
 

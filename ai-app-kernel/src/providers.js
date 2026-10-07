@@ -202,12 +202,75 @@ function extractOpenAICompatibleReply(body) {
   return outputContent;
 }
 
-export async function chatProvider(provider, token, model, messages, fetchImpl = fetch) {
+
+/**
+ * Classify upstream errors so the router can act at the right scope
+ * (key-wide vs model-only vs transient).
+ */
+export function classifyProviderError(err) {
+  const status = Number(err?.status || err?.statusCode || 0) || 0;
+  const text = String(err?.message || err?.body || err || '');
+  const low = text.toLowerCase();
+
+  if (status === 401 || status === 403
+      || /invalid.?api.?key|incorrect api key|authentication|unauthorized|permission.?denied|forbidden/i.test(text)) {
+    return { class: 'INVALID', scope: 'key', status: status || 401, retryable: false };
+  }
+  if (status === 402
+      || /credit balance is too low|insufficient.?balance|insufficient.?quota|billing|payment.?required|credit_balance_exhausted|no credits remaining|plans?\s*&\s*billing/i.test(text)) {
+    return { class: 'BILLING_REQUIRED', scope: 'key', status: status || 402, retryable: false };
+  }
+  if (status === 429 || /rate.?limit|too many requests|quota.?exceeded|resource.?exhausted/i.test(text)) {
+    if (/shared.?pool|upstream/i.test(text)) {
+      return { class: 'UPSTREAM_429', scope: 'model', status: 429, retryable: true };
+    }
+    return { class: 'MODEL_429', scope: 'model', status: 429, retryable: true };
+  }
+  if (status === 404 || /model.?not.?found|does not exist|unknown model|not_found_error/i.test(text)) {
+    return { class: 'MODEL_UNAVAILABLE', scope: 'model', status: status || 404, retryable: true };
+  }
+  if (status === 504 || /REQUEST_TIMEOUT|timeout|aborted|ETIMEDOUT|ECONNRESET/i.test(text)) {
+    return { class: 'TIMEOUT', scope: 'model', status: status || 504, retryable: true };
+  }
+  if (status === 400) {
+    if (/credit balance|insufficient|billing|quota/i.test(text)) {
+      return { class: 'BILLING_REQUIRED', scope: 'key', status: 400, retryable: false };
+    }
+    if (/model|not.?found|unsupported/i.test(text)) {
+      return { class: 'MODEL_UNAVAILABLE', scope: 'model', status: 400, retryable: true };
+    }
+  }
+  if (status >= 500) {
+    return { class: 'PROVIDER_5XX', scope: 'model', status, retryable: true };
+  }
+  return { class: 'PROVIDER_ERROR', scope: 'model', status: status || 502, retryable: true };
+}
+
+export function adaptiveTimeoutMs(provider, opts = {}) {
+  if (opts.timeoutMs) return Number(opts.timeoutMs);
+  const type = provider?.type || '';
+  if (type === 'ollama') return Number(process.env.OLLAMA_CHAT_TIMEOUT_MS || 120000);
+  if (type === 'gemini') return Number(process.env.CLOUD_CHAT_TIMEOUT_MS || 25000);
+  if (type === 'anthropic') return Number(process.env.CLOUD_CHAT_TIMEOUT_MS || 30000);
+  return Number(process.env.CLOUD_CHAT_TIMEOUT_MS || 20000);
+}
+
+export function adaptiveNumPredict(messages = []) {
+  const env = Number(process.env.OLLAMA_NUM_PREDICT || 0);
+  if (env > 0) return env;
+  const text = (Array.isArray(messages) ? messages : []).map(m => String(m?.content || '')).join(' ');
+  const len = text.length;
+  if (len < 80) return 96;
+  if (len < 400) return 192;
+  if (len < 1200) return 320;
+  return 512;
+}
+
+export async function chatProvider(provider, token, model, messages, fetchImpl = fetch, opts = {}) {
   if (provider.type === 'ollama') {
-    // CPU / Pi SoloHost: first token can be very slow. Allow up to 10 minutes.
-    // Cap output length so weak hardware finishes within a reasonable time.
-    const timeoutMs = Number(process.env.OLLAMA_CHAT_TIMEOUT_MS || 600000);
-    const numPredict = Number(process.env.OLLAMA_NUM_PREDICT || 256);
+    // Adaptive: simple questions finish faster; heavy local models still get room.
+    const timeoutMs = Number(opts.timeoutMs || process.env.OLLAMA_CHAT_TIMEOUT_MS || 120000);
+    const numPredict = Number(opts.numPredict || process.env.OLLAMA_NUM_PREDICT || 0) || adaptiveNumPredict(messages);
     const numCtx = Number(process.env.OLLAMA_NUM_CTX || 2048);
     const base = String(provider.baseUrl || 'http://127.0.0.1:11434').replace(/\/$/, '');
     const r = await fetchImpl(`${base}/api/chat`, {
@@ -255,7 +318,7 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        timeoutMs: 45000
+        timeoutMs: adaptiveTimeoutMs(provider, opts)
       }
     );
     if (!r.ok) throw await providerError(r);
@@ -303,7 +366,7 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
     body: JSON.stringify({ model, messages, temperature: 0.2 }),
-    timeoutMs: 90000
+    timeoutMs: adaptiveTimeoutMs(provider, opts)
   });
   if (!r.ok) throw await providerError(r);
   const j = await r.json();
@@ -338,5 +401,10 @@ async function providerError(r) {
   const e = new Error(`PROVIDER_${r.status}: ${body.slice(0, 400)}`);
   e.status = r.status;
   e.body = body;
+  const cls = classifyProviderError(e);
+  e.errorClass = cls.class;
+  e.errorScope = cls.scope;
+  if (cls.class === 'BILLING_REQUIRED' && e.status === 400) e.status = 402;
+  if (cls.class === 'INVALID' && !e.status) e.status = 401;
   return e;
 }
