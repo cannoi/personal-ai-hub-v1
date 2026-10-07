@@ -177,7 +177,39 @@
           <div><p class="text-xs uppercase tracking-widest text-indigo-400 font-semibold">AI Infrastructure</p><h2 class="text-2xl lg:text-3xl font-bold mt-1">Your Personal AI Hub</h2><p class="text-sm text-slate-400 mt-2">One private control plane for cloud and local AI across your SoloHost apps.</p></div>
           <div class="flex gap-2"><span id="hub-health" class="px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-400">Checking health…</span><button id="refresh-hub" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs"><i class="fa-solid fa-rotate"></i></button></div>
         </div>
+        
         <div id="provider-dashboard" class="grid sm:grid-cols-2 xl:grid-cols-3 gap-4"></div>
+
+        <!-- Public Gateway + pah_ token management -->
+        <section class="rounded-2xl border border-indigo-500/20 bg-slate-900/60 p-5 space-y-4" id="gateway-section">
+          <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+            <div>
+              <p class="text-xs uppercase tracking-widest text-indigo-400 font-semibold">OpenAI-compatible Gateway</p>
+              <h3 class="text-lg font-bold mt-1">Remote / third-party access</h3>
+              <p class="text-xs text-slate-400 mt-1">Share this Base URL with other apps. API keys stay inside the Hub — apps only need a <code class="text-indigo-300">pah_</code> token.</p>
+            </div>
+            <div class="flex flex-wrap gap-2">
+              <button type="button" id="copy-gw-base" class="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs font-medium">Copy Base URL</button>
+              <button type="button" id="detect-public-ip" class="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs">Detect public IP</button>
+            </div>
+          </div>
+          <div id="gw-base-url" class="rounded-xl border border-slate-800 bg-slate-950/50 p-3 text-xs font-mono text-slate-300 break-all">Detecting…</div>
+          <p id="gateway-health" class="text-[11px] text-slate-500"></p>
+          <pre id="gw-curl-sample" class="hidden text-[10px] text-slate-500 overflow-x-auto"></pre>
+
+          <div class="border-t border-slate-800 pt-4">
+            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
+              <h4 class="text-sm font-semibold text-slate-200">Gateway tokens (<code class="text-indigo-300">pah_</code>)</h4>
+              <div class="flex flex-wrap gap-2 items-center">
+                <input id="gw-token-name" type="text" placeholder="App name (e.g. App Builder)" class="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs w-44" maxlength="80">
+                <button type="button" id="gw-create-token" class="px-3 py-1.5 rounded-lg bg-emerald-600/90 hover:bg-emerald-500 text-xs font-medium">Add token</button>
+              </div>
+            </div>
+            <div id="gw-token-once" class="hidden mb-3 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-100"></div>
+            <div id="gw-token-list" class="space-y-2 text-xs text-slate-400">Loading tokens…</div>
+          </div>
+        </section>
+
         <section class="rounded-2xl border border-indigo-500/20 bg-indigo-500/5 p-5 space-y-4">
           <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
             <div><h3 class="font-semibold">AI for your SoloHost apps</h3><p class="text-xs text-slate-400 mt-1">Your apps use this Hub instead of storing separate provider keys.</p></div>
@@ -812,6 +844,23 @@
       setTimeout(() => $('copy-gw-base').textContent = 'Copy Base URL', 1200);
     } catch (e) {}
   };
+  
+  if ($('detect-public-ip')) $('detect-public-ip').onclick = async () => {
+    const btn = $('detect-public-ip');
+    btn.disabled = true; btn.textContent = 'Detecting…';
+    try {
+      const r = await json('/api/v1/gateway/detect-ip', { method: 'POST' });
+      if (r.publicOpenaiBaseUrl) {
+        if ($('gw-base-url')) $('gw-base-url').innerHTML =
+          '<div class="text-emerald-300 font-medium">Public OpenAI Base URL</div>' +
+          '<div class="font-mono text-sm break-all mt-1">' + esc(r.publicOpenaiBaseUrl) + '</div>';
+        if ($('copy-gw-base')) $('copy-gw-base').dataset.url = r.publicOpenaiBaseUrl;
+      }
+      await refreshGateway();
+    } catch (e) { alert(e.message || 'Detect failed'); }
+    finally { btn.disabled = false; btn.textContent = 'Detect public IP'; }
+  };
+
   if ($('copy-gw-curl')) $('copy-gw-curl').onclick = async () => {
     try { await navigator.clipboard.writeText($('gw-curl-sample').textContent); $('copy-gw-curl').textContent = 'Copied'; setTimeout(() => $('copy-gw-curl').textContent = 'Copy curl', 1200); } catch (e) {}
   };

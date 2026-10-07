@@ -69,7 +69,7 @@ const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-m
 const feedbackService = createFeedbackService({
   appId: 'personal-ai-hub',
   appName: 'Personal AI Hub',
-  version: '1.8.12'
+  version: '1.8.13'
 });
 mountFeedbackRoutes(app, feedbackService);
 
@@ -241,7 +241,7 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '1.8.12',
+    version: '1.8.13',
     openaiCompatible: true,
     routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });
@@ -266,6 +266,61 @@ app.get('/health', async (_req, res) => {
     res.json({ status: 'healthy', service: SERVICE_NAME, timestamp: new Date().toISOString() });
   }
 });
+
+
+/** Cached public IP for simple third-party Base URL: http://IP:HOST_PORT/v1 */
+let cachedPublicIp = { ip: null, checkedAt: 0, error: null };
+const PUBLIC_IP_TTL_MS = Number(process.env.PUBLIC_IP_TTL_MS || 6 * 60 * 60 * 1000); // 6h
+
+function isLikelyPublicIp(ip) {
+  const s = String(ip || '').trim();
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(s)) return false;
+  const p = s.split('.').map(Number);
+  if (p.some(n => n > 255)) return false;
+  if (p[0] === 10) return false;
+  if (p[0] === 127) return false;
+  if (p[0] === 0) return false;
+  if (p[0] === 169 && p[1] === 254) return false;
+  if (p[0] === 172 && p[1] >= 16 && p[1] <= 31) return false;
+  if (p[0] === 192 && p[1] === 168) return false;
+  if (p[0] >= 224) return false; // multicast/reserved
+  return true;
+}
+
+async function detectPublicIp(force = false) {
+  const now = Date.now();
+  if (!force && cachedPublicIp.ip && (now - cachedPublicIp.checkedAt) < PUBLIC_IP_TTL_MS) {
+    return cachedPublicIp.ip;
+  }
+  // Only HTTPS public echo services — no private/metadata targets (SSRF-safe fixed list)
+  const endpoints = [
+    'https://api.ipify.org',
+    'https://ifconfig.me/ip',
+    'https://icanhazip.com'
+  ];
+  for (const url of endpoints) {
+    try {
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 4000);
+      const r = await fetch(url, { signal: ac.signal, headers: { Accept: 'text/plain' } });
+      clearTimeout(timer);
+      if (!r.ok) continue;
+      const text = (await r.text()).trim().split(/\s+/)[0];
+      if (isLikelyPublicIp(text)) {
+        cachedPublicIp = { ip: text, checkedAt: Date.now(), error: null };
+        console.log('[hub] Public IP detected:', text);
+        return text;
+      }
+    } catch (err) {
+      cachedPublicIp.error = String(err?.message || err).slice(0, 120);
+    }
+  }
+  return cachedPublicIp.ip; // may be null
+}
+
+// Refresh in background (non-blocking); never spam
+setTimeout(() => { detectPublicIp(true).catch(() => {}); }, 3000);
+setInterval(() => { detectPublicIp(false).catch(() => {}); }, PUBLIC_IP_TTL_MS).unref?.();
 
 /**
  * Build reachable OpenAI base URLs for SoloHost apps.
@@ -304,22 +359,31 @@ function resolveConnectionBases(req) {
     }
   }
 
-  const externalBase = (PUBLIC_BASE_URL || process.env.AI_HUB_PUBLIC_URL || derivedPublic || '').replace(/\/$/, '') || null;
+  // Auto public IP: http://PUBLIC_IP:HOST_PORT — simplest for everyday users
+  const autoIp = cachedPublicIp.ip || null;
+  const autoPublicBase = autoIp ? `http://${autoIp}:${publishedPort}` : null;
 
-  // Priority for third-party / remote: PUBLIC_BASE_URL → derived public → request Host → host-gateway → docker DNS
+  const externalBase = (PUBLIC_BASE_URL || process.env.AI_HUB_PUBLIC_URL || autoPublicBase || derivedPublic || '').replace(/\/$/, '') || null;
+
+  // Priority: auto/public IP → request Host → host-gateway → docker DNS
   const ordered = [];
   if (externalBase) ordered.push(externalBase);
+  if (autoPublicBase && autoPublicBase !== externalBase) ordered.push(autoPublicBase);
   if (requestBase && requestBase !== externalBase) ordered.push(requestBase);
   ordered.push(...hostGatewayBases);
   ordered.push(...dockerAliases);
 
   const unique = [...new Set(ordered.filter(Boolean))];
+  const publicOpenaiBaseUrl = externalBase
+    ? `${externalBase}/v1`
+    : (autoPublicBase ? `${autoPublicBase}/v1` : `http://HOST_IP:${publishedPort}/v1`);
   return {
     requestBase,
     dockerBase,
     publishedPort,
     externalBase,
-    publicOpenaiBaseUrl: externalBase ? `${externalBase}/v1` : `http://HOST_IP:${publishedPort}/v1`,
+    detectedPublicIp: autoIp,
+    publicOpenaiBaseUrl,
     bases: unique,
     openaiBases: unique.map(b => `${b.replace(/\/$/, '')}/v1`)
   };
@@ -420,6 +484,18 @@ app.get('/api/v1/gateway', (req, res) => {
 });
 
 /** OpenAI base path discovery — clients that open only /v1 get JSON, not SPA HTML */
+
+app.post('/api/v1/gateway/detect-ip', requireAdmin, async (req, res) => {
+  const ip = await detectPublicIp(true);
+  const port = process.env.HOST_PORT || '59971';
+  res.json({
+    ok: !!ip,
+    detectedPublicIp: ip,
+    publicOpenaiBaseUrl: ip ? `http://${ip}:${port}/v1` : null,
+    error: ip ? null : (cachedPublicIp.error || 'DETECTION_FAILED')
+  });
+});
+
 app.get(['/v1', '/v1/'], (req, res) => {
   const c = resolveConnectionBases(req);
   res.json({
