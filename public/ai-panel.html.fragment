@@ -1,0 +1,61 @@
+<!-- Universal AI + Feedback panel: additive only; main app UI remains unchanged. -->
+<button type="button" class="ai-fab" id="aiFab" title="AI Hub" aria-label="AI Hub">
+  <img src="/ai-icon.png" alt="AI" class="ai-fab-img">
+  <span class="ai-fab-dot" id="aiStatusDot"></span>
+  <span class="ai-badge" id="aiBadge" hidden></span>
+</button>
+<div class="panel-overlay" id="aiOverlay" hidden>
+  <div class="panel ai-panel" id="aiPanel" role="dialog" aria-modal="true" aria-label="Personal AI Hub">
+    <div class="panel-header"><span class="panel-title">✦ Personal AI Hub</span><button type="button" class="panel-close" id="aiClose" aria-label="Close">×</button></div>
+    <div class="panel-tabs">
+      <button type="button" class="tab active" data-tab="chat">Chat</button>
+      <button type="button" class="tab" data-tab="feedback">Feedback <span class="tab-badge" id="fbTabBadge" hidden></span></button>
+      <button type="button" class="tab" data-tab="settings">Settings</button>
+      <button type="button" class="tab" data-tab="logs">Logs</button>
+    </div>
+
+    <div class="tab-pane active" id="tab-chat">
+      <div class="panel-body" id="aiChat">
+        <div class="fb-hint">Chat is optional. The Hub's main job is to provide AI power to SoloHost apps.</div>
+      </div>
+      <div class="panel-footer"><input type="text" id="aiInput" placeholder="Ask your AI…" autocomplete="off"><button type="button" id="aiSend" aria-label="Send">➤</button></div>
+      <div class="ai-status-bar" id="aiStatusBar">Checking AI…</div>
+    </div>
+
+    <div class="tab-pane" id="tab-feedback">
+      <div class="panel-body fb-body">
+        <div id="fbNotices" class="fb-notices"></div>
+        <div id="fbDonate" class="fb-donate" hidden></div>
+        <label class="fb-label">Type</label><select id="fbType"><option value="improvement">Improvement</option><option value="bug">Bug</option><option value="question">Question</option></select>
+        <label class="fb-label">Rating</label><div class="fb-stars" id="fbStars"><button type="button" data-r="1">★</button><button type="button" data-r="2">★</button><button type="button" data-r="3">★</button><button type="button" data-r="4">★</button><button type="button" data-r="5">★</button></div>
+        <label class="fb-label">Message</label><textarea id="fbMessage" rows="3" maxlength="2000" placeholder="Your feedback…"></textarea>
+        <p class="fb-hint">Do not include passwords or API keys.</p><button type="button" class="fb-submit" id="fbSubmit">Send Feedback</button><p class="fb-status" id="fbStatus"></p>
+      </div>
+    </div>
+
+    <div class="tab-pane" id="tab-settings">
+      <div class="panel-body settings-body">
+        <section class="setup-card">
+          <strong>How to use your AI key</strong>
+          <div id="aiSetupGuide" class="fb-hint"></div>
+        </section>
+        <label class="fb-label">AI Provider</label><select id="setProvider"></select>
+        <label class="fb-label">API Key / Token</label><input type="password" id="setApiKey" placeholder="Paste your provider key here" autocomplete="off">
+        <label class="fb-label">Custom Base URL <span id="baseUrlHint"></span></label><input type="text" id="setBaseUrl" placeholder="https://your-openai-compatible-server/v1">
+        <label class="fb-label">Model</label><input type="text" id="setModel" placeholder="Auto — recommended" value="auto">
+        <label class="fb-label">Routing</label><select id="setMode"><option value="balanced">Balanced</option><option value="prefer_local">Prefer Local</option><option value="local_only">Local Only</option><option value="cloud">Cloud Only</option></select>
+        <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button type="button" class="fb-submit" id="setSave">Add & Check Key</button><button type="button" class="ws-btn" id="setModels">Refresh</button></div>
+        <p class="fb-status" id="setStatus"></p>
+        <div class="fb-label">Configured keys</div><div id="moduleKeyList" class="app-log-view" style="max-height:180px"></div>
+
+        <section class="setup-card" style="margin-top:10px"><strong>Local AI</strong><div id="localGuide" class="fb-hint">Choose Local AI to use Ollama without a cloud API key.</div><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="localModelName" placeholder="e.g. qwen3:4b"><button type="button" class="ws-btn" id="localPullBtn">Download</button></div><div id="localModelList" class="app-log-view" style="max-height:120px;margin-top:8px"></div></section>
+
+        <section class="setup-card" style="margin-top:10px"><strong>Use the Hub from other SoloHost apps</strong><div id="gatewayGuide" class="fb-hint"></div><code id="gatewayBase" class="fb-val"></code><button type="button" class="ws-btn" id="createGatewayBtn" style="margin-top:8px">Create app connection token</button><div id="gatewayTokenOnce" class="fb-val" hidden></div></section>
+
+        <section class="setup-card" style="margin-top:10px"><strong>Backup & Restore</strong><div class="fb-hint">Export your providers, AI keys, routing and Hub connection tokens into an encrypted backup. You need the backup password to restore it after reinstall.</div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button type="button" class="ws-btn" id="exportBackupBtn">Download backup</button><label class="ws-btn" style="cursor:pointer">Restore backup<input id="importBackupFile" type="file" accept="application/json,.json,.pah-backup" hidden></label></div><input type="password" id="backupPassphrase" placeholder="Backup password (8+ characters)" style="margin-top:8px"><p id="backupStatus" class="fb-status"></p></section>
+      </div>
+    </div>
+
+    <div class="tab-pane" id="tab-logs"><div class="panel-body logs-body"><div class="logs-toolbar"><button type="button" class="ws-btn" id="logsRefresh">Refresh</button><button type="button" class="ws-btn" id="logsClear">Clear</button></div><pre id="logsView" class="logs-view">Loading…</pre></div></div>
+  </div>
+</div>

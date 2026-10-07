@@ -213,9 +213,48 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     await kernel.gateway.recordUsage({ tokenId: req.gatewayTokenId, appId, usage, error: !!result.error });
     if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
     const id = requestId.startsWith('chatcmpl-') ? requestId : `chatcmpl-${requestId}`;
+
+    // OpenAI-compatible clients expect non-2xx + error object when the upstream chat failed.
+    // Returning HTTP 200 with empty content breaks Universal AI modules and other SDKs
+    // ("provider returned no text content") even though the Hub knows the real failure.
+    if (result && result.error) {
+      let status = 502;
+      const code = String(result.error || 'AI_PROVIDER_ERROR');
+      if (/NO_ACTIVE_KEY|NO_PROVIDER|ALL_PROVIDERS/i.test(code)) status = 503;
+      if (/RATE_LIMIT|USAGE_QUOTA|QUOTA/i.test(code) || /429/.test(String(result.message || ''))) status = 429;
+      if (/AUTH|INVALID_GATEWAY|FORBIDDEN/i.test(code)) status = 401;
+      return res.status(status).json({
+        error: {
+          message: String(result.message || result.error || 'AI provider unavailable').slice(0, 700),
+          type: status === 401 ? 'invalid_request_error' : 'api_error',
+          code: code.slice(0, 64),
+          request_id: result.requestId || requestId,
+          personal_ai_hub: {
+            provider: result.provider || null,
+            keyId: result.keyId || null,
+            failures: Array.isArray(result.failures) ? result.failures.slice(0, 8) : undefined,
+            needsUserAction: !!result.needsUserAction
+          }
+        }
+      });
+    }
+
+    const content = String(result.reply || '').trim();
+    if (!content) {
+      // Defensive: success path must never hand empty assistant content to OpenAI clients.
+      return res.status(502).json({
+        error: {
+          message: 'Personal AI Hub returned an empty assistant message. Check Settings → Activity Log and Test provider keys.',
+          type: 'api_error',
+          code: 'EMPTY_ASSISTANT_CONTENT',
+          request_id: result.requestId || requestId
+        }
+      });
+    }
+
     const payload = {
       id, object: 'chat.completion', created: Math.floor(Date.now()/1000), model: result.model || body.model || 'auto',
-      choices: [{ index: 0, message: { role: 'assistant', content: result.reply || '' }, finish_reason: 'stop', logprobs: null }],
+      choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop', logprobs: null }],
       usage,
       personal_ai_hub: { provider: result.provider || null, keyId: result.keyId || null, requestId: result.requestId || requestId, latencyMs: Date.now()-started, appId }
     };
@@ -246,7 +285,33 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage,error:!!result.error});
     if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
     res.setHeader('X-Request-Id', requestId);
-    return res.json({ id:requestId, object:'response', created_at:Math.floor(Date.now()/1000), model:result.model || body.model || 'auto', output:[{id:`msg_${randomUUID().replace(/-/g,'').slice(0,20)}`,type:'message',role:'assistant',content:[{type:'output_text',text:result.reply || ''}]}], status:'completed', usage });
+    if (result && result.error) {
+      let status = 502;
+      const code = String(result.error || 'AI_PROVIDER_ERROR');
+      if (/NO_ACTIVE_KEY|NO_PROVIDER|ALL_PROVIDERS/i.test(code)) status = 503;
+      if (/RATE_LIMIT|USAGE_QUOTA|QUOTA/i.test(code) || /429/.test(String(result.message || ''))) status = 429;
+      if (/AUTH|INVALID_GATEWAY|FORBIDDEN/i.test(code)) status = 401;
+      return res.status(status).json({
+        error: {
+          message: String(result.message || result.error || 'AI provider unavailable').slice(0, 700),
+          type: status === 401 ? 'invalid_request_error' : 'api_error',
+          code: code.slice(0, 64),
+          request_id: result.requestId || requestId
+        }
+      });
+    }
+    const text = String(result.reply || '').trim();
+    if (!text) {
+      return res.status(502).json({
+        error: {
+          message: 'Personal AI Hub returned an empty assistant message. Check Settings → Activity Log and Test provider keys.',
+          type: 'api_error',
+          code: 'EMPTY_ASSISTANT_CONTENT',
+          request_id: result.requestId || requestId
+        }
+      });
+    }
+    return res.json({ id:requestId, object:'response', created_at:Math.floor(Date.now()/1000), model:result.model || body.model || 'auto', output:[{id:`msg_${randomUUID().replace(/-/g,'').slice(0,20)}`,type:'message',role:'assistant',content:[{type:'output_text',text}]}], status:'completed', usage });
   });
 
   const embeddings = asyncRoute(async (req, res) => {

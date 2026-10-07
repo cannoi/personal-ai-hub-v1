@@ -39,7 +39,8 @@
       background: rgba(99, 102, 241, 0.5);
     }
   </style>
-<style>.paf-made-by{position:fixed;right:8px;bottom:8px;width:min(72px,12vw);max-width:12vw;height:auto;object-fit:contain;opacity:.5;background:transparent;padding:0;border:0;box-shadow:none;filter:none;pointer-events:none;z-index:30}</style>  <script src="/shfh-client.js" defer></script>
+<style>.paf-made-by{position:fixed;right:8px;bottom:8px;width:min(72px,12vw);max-width:12vw;height:auto;object-fit:contain;opacity:.5;background:transparent;padding:0;border:0;box-shadow:none;filter:none;pointer-events:none;z-index:30}</style>
+  <link rel="stylesheet" href="/ai-panel.css">
 </head>
 <body class="h-full flex flex-col font-sans overflow-hidden">
   <div id="login-gate" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 backdrop-blur-sm p-4">
@@ -61,14 +62,6 @@
 
 
   <!-- Header -->
-  
-  <div id="feedback-panel" class="hidden fixed inset-0 z-[90] flex items-end sm:items-center justify-center bg-black/60 p-3 sm:p-6">
-    <div class="w-full max-w-md max-h-[90vh] overflow-y-auto rounded-2xl border border-slate-700 bg-slate-900 shadow-2xl">
-      <div class="flex items-center justify-between px-4 py-3 border-b border-slate-800">
-        <div>
-          <div class="font-semibold text-sm">Feedback</div>
-          <div class="text-[10px] text-slate-500">SoloHost Feedback Hub</div>
-        </div>
         <button type="button" id="feedback-close" class="h-8 w-8 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300"><i class="fa-solid fa-xmark"></i></button>
       </div>
       <div class="p-4 space-y-4">
@@ -119,11 +112,6 @@
         </button>
         <button id="logout-btn" class="hidden inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700" title="Logout">
           <i class="fa-solid fa-right-from-bracket text-slate-400"></i><span class="hidden sm:inline">Logout</span>
-        </button>
-        <button id="feedback-btn" type="button" class="relative inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700" title="Feedback">
-          <i class="fa-solid fa-comment-dots text-amber-400"></i>
-          <span class="hidden sm:inline">Feedback</span>
-          <span id="feedback-badge" class="hidden absolute -top-1 -right-1 min-w-[1.1rem] h-[1.1rem] px-1 rounded-full bg-rose-500 text-[10px] leading-[1.1rem] text-center font-bold">0</span>
         </button>
         <button id="settings-btn" class="inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700">
           <i class="fa-solid fa-gear text-indigo-400"></i><span class="hidden sm:inline">Settings</span>
@@ -177,6 +165,9 @@
               <option value="groq">Groq</option>
               <option value="openrouter">OpenRouter</option>
               <option value="anthropic">Anthropic</option>
+              <option value="mistral">Mistral</option>
+              <option value="xai">xAI</option>
+              <option value="custom">Custom OpenAI-compatible</option>
               <option value="local">Local AI (Ollama)</option>
             </select>
           </div>
@@ -212,46 +203,16 @@
           <div><p class="text-xs uppercase tracking-widest text-indigo-400 font-semibold">AI Infrastructure</p><h2 class="text-2xl lg:text-3xl font-bold mt-1">Your Personal AI Hub</h2><p class="text-sm text-slate-400 mt-2">One private control plane for cloud and local AI across your SoloHost apps.</p></div>
           <div class="flex gap-2"><span id="hub-health" class="px-3 py-2 rounded-xl bg-slate-900 border border-slate-800 text-xs text-slate-400">Checking health…</span><button id="refresh-hub" class="px-3 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-xs"><i class="fa-solid fa-rotate"></i></button></div>
         </div>
-        <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
-          <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3"><div class="text-[10px] text-slate-500 uppercase">Active Keys</div><div id="active-key-count" class="text-xl font-bold mt-1">—</div></div>
-          <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3"><div class="text-[10px] text-slate-500 uppercase">Providers Ready</div><div id="ready-provider-count" class="text-xl font-bold mt-1">—</div></div>
-          <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3"><div class="text-[10px] text-slate-500 uppercase">Local AI</div><div id="local-model-count" class="text-xl font-bold mt-1">—</div></div>
-          <div class="rounded-xl border border-slate-800 bg-slate-900/60 p-3"><div class="text-[10px] text-slate-500 uppercase">Diagnostics</div><div id="diagnostic-state" class="text-sm font-semibold mt-2 text-slate-400">Checking…</div></div>
-        </div>
         <div id="provider-dashboard" class="grid sm:grid-cols-2 xl:grid-cols-3 gap-4"></div>
         <section class="rounded-2xl border border-indigo-500/20 bg-indigo-500/5 p-5 space-y-4">
           <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-            <div><h3 class="font-semibold">SoloHost AI Gateway · OpenAI-compatible /v1</h3><p class="text-xs text-slate-400 mt-1">Một cổng AI dùng chung — App Builder, Calculator, Telegram… gọi Hub thay vì nhúng API key riêng.</p></div>
-            <span id="gateway-health" class="px-3 py-2 rounded-lg bg-slate-900 border border-slate-800 text-[11px] text-slate-400">API ready</span>
+            <div><h3 class="font-semibold">AI for your SoloHost apps</h3><p class="text-xs text-slate-400 mt-1">Your apps use this Hub instead of storing separate provider keys.</p></div>
+            <button id="open-ai-panel" class="px-3 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs">Open AI Hub</button>
           </div>
-          <div class="grid sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            <div class="rounded-xl bg-slate-950/60 p-3"><div class="text-[10px] text-slate-500 uppercase">Chat</div><div class="font-mono text-[11px] mt-1 break-all" id="gw-chat">/api/v1/chat</div></div>
-            <div class="rounded-xl bg-slate-950/60 p-3"><div class="text-[10px] text-slate-500 uppercase">Health</div><div class="font-mono text-[11px] mt-1 break-all">/api/v1/health</div></div>
-            <div class="rounded-xl bg-slate-950/60 p-3"><div class="text-[10px] text-slate-500 uppercase">Discovery</div><div class="font-mono text-[11px] mt-1 break-all">/api/v1/gateway</div></div>
-            <div class="rounded-xl bg-slate-950/60 p-3"><div class="text-[10px] text-slate-500 uppercase">SDK</div><div class="font-mono text-[11px] mt-1 break-all">/ai-hub-sdk.js</div></div>
-          </div>
-          <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-3">
-            <div class="text-[10px] text-slate-500 uppercase mb-1">Base URL (copy for other apps)</div>
-            <div class="flex flex-col sm:flex-row gap-2 items-stretch sm:items-center">
-              <code id="gw-base-url" class="flex-1 font-mono text-xs text-indigo-300 break-all">—</code>
-              <button id="copy-gw-base" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs shrink-0">Copy base</button>
-              <button id="copy-gw-curl" class="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs shrink-0">Copy curl</button>
-            </div>
-            <pre id="gw-curl-sample" class="mt-2 text-[10px] text-slate-400 overflow-x-auto whitespace-pre-wrap"></pre>
-          </div>
-          <div class="rounded-xl border border-slate-800 bg-slate-950/40 p-3 space-y-3">
-            <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <h4 class="text-sm font-semibold">Gateway access tokens</h4>
-                <p class="text-[11px] text-slate-500">Tạo token để app SoloHost gọi Hub qua header <code class="text-indigo-300">X-Personal-AI-Key</code>. Token chỉ hiện 1 lần khi tạo.</p>
-              </div>
-              <div class="flex gap-2">
-                <input id="gw-token-name" class="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs w-36" placeholder="App name">
-                <button id="gw-create-token" class="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-xs shrink-0">Create token</button>
-              </div>
-            </div>
-            <div id="gw-token-once" class="hidden rounded-lg border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-100"></div>
-            <div id="gw-token-list" class="space-y-2 text-xs text-slate-400">Loading…</div>
+          <div class="grid sm:grid-cols-3 gap-3 text-xs">
+            <div class="rounded-xl bg-slate-950/60 p-3"><div class="font-semibold">1. Add AI</div><div class="text-slate-500 mt-1">Open AI Hub → Settings → choose Provider → add key.</div></div>
+            <div class="rounded-xl bg-slate-950/60 p-3"><div class="font-semibold">2. Local AI</div><div class="text-slate-500 mt-1">Choose Local AI and download a model. No cloud key needed.</div></div>
+            <div class="rounded-xl bg-slate-950/60 p-3"><div class="font-semibold">3. Connect apps</div><div class="text-slate-500 mt-1">Create one app token. Provider keys stay private inside the Hub.</div></div>
           </div>
         </section>
         <div class="grid lg:grid-cols-2 gap-4">
@@ -337,6 +298,72 @@
   </div>
   <!-- Certified Badge -->
   
+
+<!-- Universal AI + Feedback panel: additive only; main app UI remains unchanged. -->
+<button type="button" class="ai-fab" id="aiFab" title="AI Hub" aria-label="AI Hub">
+  <img src="/ai-icon.png" alt="AI" class="ai-fab-img">
+  <span class="ai-fab-dot" id="aiStatusDot"></span>
+  <span class="ai-badge" id="aiBadge" hidden></span>
+</button>
+<div class="panel-overlay" id="aiOverlay" hidden>
+  <div class="panel ai-panel" id="aiPanel" role="dialog" aria-modal="true" aria-label="Personal AI Hub">
+    <div class="panel-header"><span class="panel-title">✦ Personal AI Hub</span><button type="button" class="panel-close" id="aiClose" aria-label="Close">×</button></div>
+    <div class="panel-tabs">
+      <button type="button" class="tab active" data-tab="chat">Chat</button>
+      <button type="button" class="tab" data-tab="feedback">Feedback <span class="tab-badge" id="fbTabBadge" hidden></span></button>
+      <button type="button" class="tab" data-tab="settings">Settings</button>
+      <button type="button" class="tab" data-tab="logs">Logs</button>
+    </div>
+
+    <div class="tab-pane active" id="tab-chat">
+      <div class="panel-body" id="aiChat">
+        <div class="fb-hint">Chat is optional. The Hub's main job is to provide AI power to SoloHost apps.</div>
+      </div>
+      <div class="panel-footer"><input type="text" id="aiInput" placeholder="Ask your AI…" autocomplete="off"><button type="button" id="aiSend" aria-label="Send">➤</button></div>
+      <div class="ai-status-bar" id="aiStatusBar">Checking AI…</div>
+    </div>
+
+    <div class="tab-pane" id="tab-feedback">
+      <div class="panel-body fb-body">
+        <div id="fbNotices" class="fb-notices"></div>
+        <div id="fbDonate" class="fb-donate" hidden></div>
+        <label class="fb-label">Type</label><select id="fbType"><option value="improvement">Improvement</option><option value="bug">Bug</option><option value="question">Question</option></select>
+        <label class="fb-label">Rating</label><div class="fb-stars" id="fbStars"><button type="button" data-r="1">★</button><button type="button" data-r="2">★</button><button type="button" data-r="3">★</button><button type="button" data-r="4">★</button><button type="button" data-r="5">★</button></div>
+        <label class="fb-label">Message</label><textarea id="fbMessage" rows="3" maxlength="2000" placeholder="Your feedback…"></textarea>
+        <p class="fb-hint">Do not include passwords or API keys.</p><button type="button" class="fb-submit" id="fbSubmit">Send Feedback</button><p class="fb-status" id="fbStatus"></p>
+      </div>
+    </div>
+
+    <div class="tab-pane" id="tab-settings">
+      <div class="panel-body settings-body">
+        <section class="setup-card">
+          <strong>How to use your AI key</strong>
+          <div id="aiSetupGuide" class="fb-hint"></div>
+        </section>
+        <label class="fb-label">AI Provider</label><select id="setProvider"></select>
+        <label class="fb-label">API Key / Token</label><input type="password" id="setApiKey" placeholder="Paste your provider key here" autocomplete="off">
+        <label class="fb-label">Custom Base URL <span id="baseUrlHint"></span></label><input type="text" id="setBaseUrl" placeholder="https://your-openai-compatible-server/v1">
+        <label class="fb-label">Model</label><input type="text" id="setModel" placeholder="Auto — recommended" value="auto">
+        <label class="fb-label">Routing</label><select id="setMode"><option value="balanced">Balanced</option><option value="prefer_local">Prefer Local</option><option value="local_only">Local Only</option><option value="cloud">Cloud Only</option></select>
+        <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button type="button" class="fb-submit" id="setSave">Add & Check Key</button><button type="button" class="ws-btn" id="setModels">Refresh</button></div>
+        <p class="fb-status" id="setStatus"></p>
+        <div class="fb-label">Configured keys</div><div id="moduleKeyList" class="app-log-view" style="max-height:180px"></div>
+
+        <section class="setup-card" style="margin-top:10px"><strong>Local AI</strong><div id="localGuide" class="fb-hint">Choose Local AI to use Ollama without a cloud API key.</div><div style="display:flex;gap:8px;margin-top:8px"><input type="text" id="localModelName" placeholder="e.g. qwen3:4b"><button type="button" class="ws-btn" id="localPullBtn">Download</button></div><div id="localModelList" class="app-log-view" style="max-height:120px;margin-top:8px"></div></section>
+
+        <section class="setup-card" style="margin-top:10px"><strong>Use the Hub from other SoloHost apps</strong><div id="gatewayGuide" class="fb-hint"></div><code id="gatewayBase" class="fb-val"></code><button type="button" class="ws-btn" id="createGatewayBtn" style="margin-top:8px">Create app connection token</button><div id="gatewayTokenOnce" class="fb-val" hidden></div></section>
+
+        <section class="setup-card" style="margin-top:10px"><strong>Backup & Restore</strong><div class="fb-hint">Export your providers, AI keys, routing and Hub connection tokens into an encrypted backup. You need the backup password to restore it after reinstall.</div><div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px"><button type="button" class="ws-btn" id="exportBackupBtn">Download backup</button><label class="ws-btn" style="cursor:pointer">Restore backup<input id="importBackupFile" type="file" accept="application/json,.json,.pah-backup" hidden></label></div><input type="password" id="backupPassphrase" placeholder="Backup password (8+ characters)" style="margin-top:8px"><p id="backupStatus" class="fb-status"></p></section>
+      </div>
+    </div>
+
+    <div class="tab-pane" id="tab-logs"><div class="panel-body logs-body"><div class="logs-toolbar"><button type="button" class="ws-btn" id="logsRefresh">Refresh</button><button type="button" class="ws-btn" id="logsClear">Clear</button></div><pre id="logsView" class="logs-view">Loading…</pre></div></div>
+  </div>
+</div>
+
+  <script src="/ai-module.js"></script>
+  <script src="/feedback-module.js"></script>
+  <script src="/ai-panel.js"></script>
 
   <script src="/ai-hub-sdk.js"></script>
 
@@ -512,6 +539,11 @@
       const provider = document.getElementById('key-provider').value;
       const token = document.getElementById('key-token').value;
       const saveBtn = document.getElementById('save-key-btn');
+      if (provider === 'custom') {
+        $('aiFab')?.click();
+        setTimeout(() => { document.querySelector('#aiPanel .tab[data-tab=\"settings\"]')?.click(); const s=$('setProvider'); if(s){s.value='custom'; s.dispatchEvent(new Event('change'));} }, 0);
+        return;
+      }
       
       saveBtn.disabled = true;
       saveBtn.innerHTML = `<i class="fa-solid fa-circle-notch animate-spin"></i> <span>${i18n[currentLang].saving}</span>`;
@@ -527,9 +559,9 @@
           document.getElementById('key-token').value = '';
           await fetchKeys();
           if (added.status === 'ACTIVE') {
-            alert(`${i18n[currentLang].successAddKey}\n\nVerified. ${added.models?.length || 0} compatible models discovered.`);
+            alert(`${i18n[currentLang].successAddKey}\n\n${added.status} · ${added.models?.length || 0} models discovered.\n\nOpen the AI button → Settings for provider-specific instructions and to use Local AI / Custom Provider.`);
           } else {
-            alert(`${i18n[currentLang].successAddKey}\n\nKey status: ${added.status}. ${added.lastError || 'Open Settings → Activity Log for details.'}`);
+            alert(`${i18n[currentLang].successAddKey}\n\nKey status: ${added.status}. ${added.lastError || 'Open the AI button → Settings → Logs for details.'}`);
           }
           await fetchKeys();
         } else {
@@ -706,9 +738,9 @@
   async function refreshChatSelectors(){try{const [p,k]=await Promise.all([json('/ai/providers'),json('/ai/keys')]);const ps=$('chat-provider'),ms=$('chat-model');ps.innerHTML='<option value="">Auto Provider</option>'+(p.providers||[]).map(x=>`<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('');const all=k.keys||[];const fill=()=>{const provider=ps.value;const models=[...new Set(all.filter(x=>x.status==='ACTIVE'&&(!provider||x.provider===provider)).flatMap(x=>x.models||[]))];ms.innerHTML='<option value="">Auto Model</option>'+models.map(m=>`<option value="${esc(m)}">${esc(m)}</option>`).join('');};ps.onchange=fill;fill();}catch(e){console.error(e);}}
   async function refreshDashboard() {
     try { const [providers, keys, health, local, logs] = await Promise.all([json('/ai/providers'),json('/ai/keys'),json('/ai/health'),json('/ai/local/models'),json('/ai/logs?limit=8')]);
-      $('hub-health').textContent=`${health.activeKeys} active key${health.activeKeys===1?'':'s'} · ${health.providers} providers`; $('gateway-health').textContent=health.ok?'Unified AI API ready':'Gateway needs attention'; $('active-key-count').textContent=health.activeKeys; $('ready-provider-count').textContent=Object.values(health.byProvider||{}).filter(x=>x.active>0).length; if(typeof renderLocalPanel==='function'){renderLocalPanel(local);}else{$('local-model-count').textContent=(local.models||[]).length;} $('diagnostic-state').textContent=health.ok?'Healthy':'Needs attention'; $('diagnostic-state').className=`text-sm font-semibold mt-2 ${health.ok?'text-emerald-400':'text-amber-400'}`;
+      $('hub-health').textContent=health.ok?'AI Hub ready':'AI Hub needs attention'; if(typeof renderLocalPanel==='function'){renderLocalPanel(local);}
       const by={}; (keys.keys||[]).forEach(k=>(by[k.provider]??=[]).push(k));
-      $('provider-dashboard').innerHTML=(providers.providers||[]).filter(p=>p.id!=='local').map(p=>{const ks=by[p.id]||[];return `<div class="rounded-2xl border border-slate-800 bg-slate-900/50 p-4"><div class="flex justify-between"><div><div class="font-semibold">${esc(p.name)}</div><div class="text-[11px] text-slate-500">${ks.length} key${ks.length===1?'':'s'} · ${esc(p.type)}</div></div><span class="text-xs ${ks.some(k=>k.status==='ACTIVE')?'text-emerald-400':'text-amber-400'}">${ks.filter(k=>k.status==='ACTIVE').length} ready</span></div><div class="mt-3 space-y-1">${ks.map(k=>`<div class="flex justify-between text-[11px] bg-slate-950/50 rounded-lg px-2 py-1.5"><span>${esc(k.masked)}</span><span class="${k.status==='ACTIVE'?'text-emerald-400':k.status==='BILLING_REQUIRED'?'text-orange-400':k.status==='INVALID'?'text-rose-400':'text-amber-400'}">${esc(k.status)}</span></div>`).join('')||'<span class="text-xs text-slate-500">No key configured</span>'}</div></div>`}).join('');
+      $('provider-dashboard').innerHTML=(providers.providers||[]).filter(p=>p.id!=='local').map(p=>{const ks=by[p.id]||[];const active=ks.some(k=>k.status==='ACTIVE');const needs=ks.some(k=>['BILLING_REQUIRED','INVALID','ERROR','MODEL_UNAVAILABLE'].includes(k.status));return `<div class="rounded-2xl border border-slate-800 bg-slate-900/50 p-4"><div class="flex justify-between items-center gap-2"><div class="font-semibold">${esc(p.name)}</div><span class="text-xs ${active?'text-emerald-400':needs?'text-amber-400':'text-slate-500'}">${active?'Ready':needs?'Needs attention':'Not configured'}</span></div></div>`}).join('');
       $('local-status').textContent=local.available?'Ollama online':'Ollama offline'; $('local-status').className=`text-xs ${local.available?'text-emerald-400':'text-slate-500'}`;
       $('local-models').innerHTML=(local.models||[]).map(m=>`<div class="flex justify-between rounded-lg bg-slate-950/50 px-3 py-2 text-xs"><span>${esc(m.name)}</span><span class="text-slate-500">${m.size?Math.round(m.size/1024/1024)+' MB':''}</span></div>`).join('')||'<div class="text-xs text-slate-500">No local models detected.</div>';
       $('activity-preview').innerHTML=(logs.logs||[]).slice(0,6).map(l=>`<div class="rounded-lg bg-slate-950/60 px-3 py-2"><div class="flex justify-between text-[10px]"><span class="${l.level==='error'?'text-rose-400':l.level==='warn'?'text-amber-400':'text-indigo-300'}">${esc(l.event)}</span><span class="text-slate-600">${esc(new Date(l.ts).toLocaleTimeString())}</span></div><div class="text-[10px] text-slate-500 mt-1">${esc(JSON.stringify(l.details))}</div></div>`).join('')||'<div class="text-xs text-slate-500">No activity yet.</div>';
@@ -737,6 +769,11 @@
   if ($('chat-nav-btn')) $('chat-nav-btn').onclick = showChat;
   if ($('chat-back-hub')) $('chat-back-hub').onclick = showHub;
   if ($('refresh-hub')) $('refresh-hub').onclick = () => { refreshDashboard(); refreshGateway(); };
+  if ($('open-ai-panel')) $('open-ai-panel').onclick = () => $('aiFab')?.click();
+  // The Universal AI panel is the single AI settings/log surface. Keep the legacy panel unreachable to avoid duplicate AI configuration paths.
+  if ($('settings-btn')) $('settings-btn').onclick = () => { $('aiFab')?.click(); setTimeout(() => document.querySelector('#aiPanel .tab[data-tab=\"settings\"]')?.click(), 0); };
+  if ($('open-logs')) $('open-logs').onclick = () => { $('aiFab')?.click(); setTimeout(() => document.querySelector('#aiPanel .tab[data-tab=\"logs\"]')?.click(), 0); };
+  if ($('chat-nav-btn')) $('chat-nav-btn').onclick = () => { $('aiFab')?.click(); setTimeout(() => document.querySelector('#aiPanel .tab[data-tab=\"chat\"]')?.click(), 0); };
 
   async function refreshGateway(){
     try {
@@ -916,103 +953,6 @@
   };
 
 
-  // SoloHost Feedback Hub — embedded, no user config required
-  let shfh = null;
-  async function initFeedbackHub() {
-    const btn = $('feedback-btn');
-    const panel = $('feedback-panel');
-    if (!btn || !panel) return;
-    if (typeof SHFH === 'undefined') {
-      // SDK not loaded yet — retry once
-      await new Promise(r => setTimeout(r, 300));
-      if (typeof SHFH === 'undefined') return;
-    }
-    let cfg;
-    try { cfg = await json('/api/shfh-config'); } catch { return; }
-    if (!cfg || cfg.enabled === false) { btn.classList.add('hidden'); return; }
-    try {
-      shfh = SHFH.create({
-        hubUrl: cfg.hubUrl,
-        ingestToken: cfg.ingestToken,
-        appId: cfg.appId,
-        appName: cfg.appName,
-        version: cfg.version || '1.8.1',
-        platform: 'solohost',
-        locale: document.documentElement.lang || 'en'
-      });
-    } catch (e) { console.warn('SHFH', e); return; }
-
-    function setBadge(n) {
-      const b = $('feedback-badge');
-      if (!b) return;
-      if (n > 0) { b.textContent = n > 9 ? '9+' : String(n); b.classList.remove('hidden'); }
-      else b.classList.add('hidden');
-    }
-
-    async function refreshFeedbackPanel() {
-      const st = $('feedback-status');
-      try {
-        const snap = await shfh.sync();
-        const donateEl = $('feedback-donate-body');
-        const d = snap && snap.donate;
-        if (donateEl) {
-          if (typeof d === 'string' && d.trim()) donateEl.textContent = d;
-          else if (d && typeof d === 'object')
-            donateEl.textContent = [d.text, d.account, d.note, d.url].filter(Boolean).join('\n') || 'Thank you for supporting SoloHost apps.';
-          else donateEl.textContent = 'Thank you for supporting SoloHost apps.';
-        }
-        const box = $('feedback-notices');
-        const notices = ((snap && snap.actions) || []).filter(Boolean);
-        if (box) {
-          if (!notices.length) box.innerHTML = '<div class="text-slate-500">No unread notices</div>';
-          else {
-            box.innerHTML = notices.map(function(n) {
-              var id = n.id || '';
-              var title = n.title || n.kind || 'Notice';
-              var body = n.body || '';
-              return '<div class="rounded-lg border border-slate-800 bg-slate-950/50 p-2"><div class="font-medium text-slate-200">' +
-                esc(title) + '</div><div class="text-slate-400 mt-0.5 whitespace-pre-wrap">' + esc(body) + '</div>' +
-                (id ? '<button type="button" data-notice-id="' + esc(id) + '" class="mt-1 text-[10px] text-indigo-400">Mark read</button>' : '') + '</div>';
-            }).join('');
-            box.querySelectorAll('[data-notice-id]').forEach(function(b) {
-              b.onclick = async function() {
-                try { await shfh.markRead(b.dataset.noticeId); } catch (e) {}
-                await refreshFeedbackPanel();
-              };
-            });
-          }
-        }
-        setBadge(notices.length);
-      } catch (e) {
-        if (st) st.textContent = 'Hub offline — feedback can queue locally.';
-      }
-    }
-
-    btn.onclick = async function() {
-      panel.classList.remove('hidden');
-      await refreshFeedbackPanel();
-    };
-    if ($('feedback-close')) $('feedback-close').onclick = function() { panel.classList.add('hidden'); };
-    panel.addEventListener('click', function(e) { if (e.target === panel) panel.classList.add('hidden'); });
-    if ($('feedback-send')) $('feedback-send').onclick = async function() {
-      var msg = (($('feedback-message') && $('feedback-message').value) || '').trim();
-      var type = ($('feedback-type') && $('feedback-type').value) || 'bug';
-      var st = $('feedback-status');
-      if (!msg) { if (st) st.textContent = 'Please enter a message.'; return; }
-      if (st) st.textContent = 'Sending…';
-      try {
-        await shfh.sendFeedback({ type: type, message: msg });
-        if ($('feedback-message')) $('feedback-message').value = '';
-        if (st) st.textContent = 'Sent. Thank you!';
-        await refreshFeedbackPanel();
-      } catch (e) {
-        if (st) st.textContent = (e && e.message) || 'Send failed (may be queued).';
-      }
-    };
-    refreshFeedbackPanel();
-    setInterval(function() { refreshFeedbackPanel().catch(function(){}); }, 120000);
-  }
-
   window.refreshDashboardExternal = async function(){ await refreshDashboard(); if (typeof refreshGateway==='function') await refreshGateway(); };
   (async function boot() {
     const ok = await ensureAdminSession();
@@ -1020,7 +960,6 @@
       await refreshDashboard();
       if (typeof refreshGateway === 'function') await refreshGateway();
     }
-    try { await initFeedbackHub(); } catch (e) { console.warn(e); }
   })();
 
   refreshChatSelectors();

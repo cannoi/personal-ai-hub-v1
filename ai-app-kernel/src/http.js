@@ -111,6 +111,13 @@ export function mountKernel(app, { prefix = '/ai', kernel, requireAdmin = null }
     res.json(await kernel.memory.clearTraining({ admin: true }))
   ));
 
+  app.post(`${prefix}/backup/export`, adminGuard, asyncRoute(async (req, res) =>
+    res.json(await kernel.backup.exportEncrypted(req.body?.passphrase))
+  ));
+  app.post(`${prefix}/backup/import`, adminGuard, asyncRoute(async (req, res) =>
+    res.json(await kernel.backup.importEncrypted(req.body?.backup, req.body?.passphrase))
+  ));
+
   app.get(`${prefix}/local/models`, asyncRoute(async (req, res) =>
     res.json(await kernel.local.models({ force: req.query.force === '1' || req.query.force === 'true' }))
   ));

@@ -1,0 +1,58 @@
+/* Personal AI Hub universal panel. Uses the host's single AI kernel. */
+(() => {
+  const $ = id => document.getElementById(id);
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  const ai = window.UniversalAI.create({ button: $('aiFab'), onOpen: openPanel });
+  let providers = [];
+  let fb = null;
+  const providerHelp = {
+    openai: 'OpenAI: paste your API key only. Base URL is automatic. Keep Model = Auto, then Add & Check Key.',
+    gemini: 'Gemini: paste your Google AI API key only. Base URL is automatic. Keep Model = Auto, then Add & Check Key.',
+    deepseek: 'DeepSeek: paste your API key only. Base URL is automatic. If the account has no balance, the key may be valid but cannot generate.',
+    anthropic: 'Anthropic: paste your API key only. Base URL is automatic. Keep Model = Auto.',
+    openrouter: 'OpenRouter: paste your OpenRouter key. You can then use models available to that key.',
+    groq: 'Groq: paste your Groq key. The Hub discovers models available to the key.',
+    mistral: 'Mistral: paste your Mistral key. The Hub discovers models automatically.',
+    xai: 'xAI: paste your xAI key. The Hub discovers models automatically.',
+    custom: 'Custom: use this only for another OpenAI-compatible AI server. Enter its API base URL, normally ending in /v1. Do NOT enter the Personal AI Hub URL here.',
+    local: 'Local AI: no API key is needed. Choose Local AI, refresh Ollama, then download a model such as qwen3:4b or llama3.2:3b.'
+  };
+
+  function setFabVisible(v) { const el=$('aiFab'); if(el){el.hidden=!v;el.style.display=v?'':'none';} }
+  function setUnread(n){ const count=Number(n)||0; ['aiBadge','fbTabBadge'].forEach(id=>{const b=$(id);if(!b)return;b.hidden=count<=0;b.style.display=count>0?'':'none';b.textContent=count>9?'9+':String(count);}); }
+  function addMsg(role, text){ const box=$('aiChat'); if(!box)return; const d=document.createElement('div'); d.className='msg '+role; d.innerHTML=esc(text).replace(/\n/g,'<br>'); box.appendChild(d); box.scrollTop=box.scrollHeight; return d; }
+
+  async function refreshStatus(){
+    try { const h=await ai.status(); const dot=$('aiStatusDot'), bar=$('aiStatusBar'); const ready=Number(h.activeKeys||0)>0 || !!h.local; if(dot){dot.classList.toggle('on',ready);dot.classList.toggle('off',!ready);} if(bar) bar.textContent=ready?'AI ready · Hub available':'Local guide ready · add a provider key or local model'; }
+    catch { if($('aiStatusBar')) $('aiStatusBar').textContent='Hub diagnostics unavailable'; }
+  }
+  function renderGuide(){ const p=$('setProvider')?.value||'openai'; if($('aiSetupGuide')) $('aiSetupGuide').innerHTML=esc(providerHelp[p]||'Choose a provider, enter its key if required, then Add & Check Key.'); const base=$('setBaseUrl'), hint=$('baseUrlHint'); if(base){base.disabled=!['custom'].includes(p); if(p==='custom'){base.placeholder='https://example.com/v1';}else{base.value='';}} if(hint) hint.textContent=p==='custom'?'(required for Custom)':'(automatic)'; }
+  async function loadProviders(){ const d=await ai.catalog(); providers=d.providers||[]; const sel=$('setProvider'); if(sel){sel.innerHTML=providers.map(p=>`<option value="${esc(p.id)}">${esc(p.name)}</option>`).join(''); if(!sel.value)sel.value='openai'; sel.onchange=renderGuide; renderGuide();} }
+  async function renderKeys(){ try{const d=await ai.keys(); $('moduleKeyList').innerHTML=(d.keys||[]).map(k=>`<div style="margin:5px 0;padding:6px;border:1px solid rgba(255,255,255,.08);border-radius:8px"><div><strong>${esc(k.provider)}</strong> · <code>${esc(k.masked)}</code> · <span class="${k.status==='ACTIVE'?'text-green-400':k.status==='BILLING_REQUIRED'?'text-orange-400':'text-yellow-300'}">${esc(k.status)}</span></div><div style="opacity:.7">${esc((k.models||[]).slice(0,4).join(', ')||'Models not discovered')}</div><button class="ws-btn" data-test="${esc(k.id)}">Test / refresh</button></div>`).join('')||'No AI keys configured yet.'; document.querySelectorAll('[data-test]').forEach(b=>b.onclick=async()=>{b.disabled=true;b.textContent='Checking…';try{await ai.testKey(b.dataset.test);await renderKeys();await refreshStatus();}finally{b.disabled=false;}});}catch(e){$('moduleKeyList').textContent=e.message;} }
+  async function loadLocal(){try{const d=await ai.models(true);$('localModelList').textContent=(d.models||[]).join('\n')|| (d.available===false?(d.hint||d.error||'Ollama is not reachable.'):'No local models installed.');}catch(e){$('localModelList').textContent=e.message;}}
+  async function loadLogs(){try{const d=await ai.logs(400);$('logsView').textContent=(d.logs||[]).map(l=>`[${l.ts}] ${String(l.level||'').toUpperCase()} ${l.event} ${JSON.stringify(l.details||{})}`).join('\n')||'(no logs)';}catch(e){$('logsView').textContent=e.message;}}
+  async function loadGateway(){try{const d=await fetch('/api/v1/gateway').then(r=>r.json()); const dns=d?.recommended?.serverToServer || `http://${d.service||'personal-ai-hub'}:8080/v1`; const base=$('gatewayBase');if(base)base.textContent=`Other SoloHost apps: ${location.origin}/v1  ·  same network: ${dns}`; if($('gatewayGuide'))$('gatewayGuide').textContent='Create one app connection token. Give that token only to the app that should use the Hub. Model = auto. Provider keys stay inside this Hub.';}catch(e){if($('gatewayGuide'))$('gatewayGuide').textContent='Gateway information unavailable.';}}
+
+  async function openPanel(){ $('aiOverlay').hidden=false; setFabVisible(false); await Promise.all([refreshStatus(),loadProviders(),renderKeys(),loadLocal(),loadGateway()]); }
+  function closePanel(){ $('aiOverlay').hidden=true; setFabVisible(true); }
+  $('aiClose')?.addEventListener('click',closePanel); $('aiOverlay')?.addEventListener('click',e=>{if(e.target.id==='aiOverlay')closePanel();});
+  document.querySelectorAll('#aiPanel .tab').forEach(t=>t.addEventListener('click',async()=>{document.querySelectorAll('#aiPanel .tab').forEach(x=>x.classList.remove('active'));document.querySelectorAll('#aiPanel .tab-pane').forEach(x=>x.classList.remove('active'));t.classList.add('active');$('tab-'+t.dataset.tab)?.classList.add('active');if(t.dataset.tab==='settings'){await loadProviders();await renderKeys();await loadLocal();await loadGateway();}if(t.dataset.tab==='logs')await loadLogs();}));
+
+  $('aiSend')?.addEventListener('click',sendChat); $('aiInput')?.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();sendChat();}});
+  async function sendChat(){const input=$('aiInput'),text=(input?.value||'').trim();if(!text)return;input.value='';addMsg('user',text);const wait=addMsg('ai','Thinking…');try{const out=await ai.chat(text,{},{});wait?.remove();addMsg('ai',out.reply||out.message||'No response');}catch(e){wait?.remove();addMsg('ai',e.message||'AI unavailable');}}
+
+  $('setSave')?.addEventListener('click',async()=>{const p=$('setProvider').value, token=$('setApiKey').value.trim(), base=$('setBaseUrl').value.trim(), status=$('setStatus');status.textContent='Checking…';try{const out=await ai.addKey(p,token,$('setModel').value.trim()||null,$('setBaseUrl').value.trim());status.textContent=`${out.status} · ${(out.models||[]).length} model(s) discovered`;$('setApiKey').value='';await renderKeys();await refreshStatus();}catch(e){status.textContent=e.message;}});
+  $('setModels')?.addEventListener('click',async()=>{await renderKeys();await loadLocal();});
+  $('localPullBtn')?.addEventListener('click',async()=>{const name=$('localModelName').value.trim(),st=$('setStatus');if(!name){st.textContent='Enter a local model name first.';return;}st.textContent='Downloading local model…';try{await ai.localPull(name);$('localModelName').value='';st.textContent='Local model downloaded.';await loadLocal();}catch(e){st.textContent=e.message;}});
+  $('createGatewayBtn')?.addEventListener('click',async()=>{const box=$('gatewayTokenOnce');try{const r=await fetch('/ai/gateway/tokens',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:'SoloHost app'})});const j=await r.json();if(!r.ok)throw new Error(j.error||'Could not create token');box.hidden=false;box.textContent='Save this token now — it is shown once: '+j.token;}catch(e){box.hidden=false;box.textContent=e.message;}});
+  $('exportBackupBtn')?.addEventListener('click',async()=>{const pass=$('backupPassphrase').value;if(pass.length<8){$('backupStatus').textContent='Use a backup password with at least 8 characters.';return;}$('backupStatus').textContent='Preparing encrypted backup…';try{const r=await fetch('/ai/backup/export',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({passphrase:pass})});const j=await r.json();if(!r.ok)throw new Error(j.error||'Backup failed');const blob=new Blob([JSON.stringify(j,null,2)],{type:'application/json'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download='personal-ai-hub-backup.pah-backup';a.click();URL.revokeObjectURL(a.href);$('backupStatus').textContent='Encrypted backup downloaded.';}catch(e){$('backupStatus').textContent=e.message;}});
+  $('importBackupFile')?.addEventListener('change',async e=>{const file=e.target.files?.[0],pass=$('backupPassphrase').value;if(!file)return;if(pass.length<8){$('backupStatus').textContent='Enter the backup password first.';return;}$('backupStatus').textContent='Restoring…';try{const backup=JSON.parse(await file.text());const r=await fetch('/ai/backup/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({backup,passphrase:pass})});const j=await r.json();if(!r.ok)throw new Error(j.error||'Restore failed');$('backupStatus').textContent=`Restored ${j.keys||0} keys and ${j.gatewayTokens||0} app tokens.`;await renderKeys();}catch(err){$('backupStatus').textContent=err.message;}});
+
+  const feedback=window.UniversalFeedback?.create({onUnread:setUnread,onSync:sync=>{renderDonate(sync.donate);renderNotices(sync.notices||[]);}}); fb=feedback;
+  function renderDonate(d){const el=$('fbDonate');if(!el)return;const rows=[];const walk=(v,p='')=>{if(v==null)return;if(['string','number'].includes(typeof v)&&String(v).trim())rows.push([p,String(v)]);else if(Array.isArray(v))v.forEach((x,i)=>walk(x,p+' '+(i+1)));else if(typeof v==='object')Object.keys(v).forEach(k=>walk(v[k],p?p+' · '+k:k));};walk(d);el.hidden=!rows.length;el.innerHTML=rows.map(x=>`<div class="fb-acc"><div>${esc(x[0])}</div><code>${esc(x[1])}</code></div>`).join('');}
+  function renderNotices(ns){const el=$('fbNotices');if(!el)return;el.innerHTML=(ns||[]).map(n=>`<div class="fb-notice"><strong>${esc(n.title||'Notice')}</strong><div>${esc(n.body||'')}</div><button type="button" data-read="${esc(n.id)}">Mark read</button></div>`).join('')||'<div class="fb-hint">No notices.</div>';el.querySelectorAll('[data-read]').forEach(b=>b.onclick=async()=>{await fb.markRead(b.dataset.read);await fb.sync();});}
+  let rating=0;document.querySelectorAll('#fbStars button').forEach(b=>b.onclick=()=>{rating=Number(b.dataset.r);document.querySelectorAll('#fbStars button').forEach(x=>x.classList.toggle('on',Number(x.dataset.r)<=rating));});
+  $('fbSubmit')?.addEventListener('click',async()=>{const st=$('fbStatus'),msg=$('fbMessage').value.trim();if(!msg){st.textContent='Please enter your feedback.';return;}st.textContent='Sending…';try{await fb.send({type:$('fbType').value,rating,message:msg});$('fbMessage').value='';st.textContent='Thank you!';}catch(e){st.textContent=e.message;}});
+  $('logsRefresh')?.addEventListener('click',loadLogs);$('logsClear')?.addEventListener('click',async()=>{await ai.clearLogs();await loadLogs();});
+  fb?.sync().catch(()=>{}); setUnread(0); setFabVisible(true); refreshStatus();
+})();

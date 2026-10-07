@@ -30,6 +30,20 @@ export const PROVIDERS = {
     baseUrl: 'https://api.anthropic.com/v1',
     models: ['claude-3-5-haiku-latest', 'claude-3-haiku-20240307', 'claude-3-7-sonnet-latest']
   },
+  mistral: {
+    id: 'mistral', name: 'Mistral', type: 'openai-compatible',
+    baseUrl: 'https://api.mistral.ai/v1',
+    models: ['mistral-small-latest', 'mistral-large-latest']
+  },
+  xai: {
+    id: 'xai', name: 'xAI', type: 'openai-compatible',
+    baseUrl: 'https://api.x.ai/v1',
+    models: ['grok-3-mini', 'grok-3']
+  },
+  custom: {
+    id: 'custom', name: 'Custom OpenAI-compatible', type: 'openai-compatible',
+    baseUrl: '', models: []
+  },
   local: {
     id: 'local', name: 'Local AI (Ollama)', type: 'ollama',
     baseUrl: process.env.OLLAMA_BASE_URL || process.env.OLLAMA_HOST || 'http://127.0.0.1:11434',
@@ -147,9 +161,8 @@ export async function listModels(provider, token, fetchImpl = fetch) {
     const j = await r.json();
     return rankChatModels((j.data || []).map(m => m.id));
   }
-  const r = await fetchImpl(`${provider.baseUrl}/models`, {
-    headers: { Authorization: `Bearer ${token}` }
-  });
+  const headers = token ? { Authorization: `Bearer ${token}` } : {};
+  const r = await fetchImpl(`${provider.baseUrl}/models`, { headers });
   if (!r.ok) throw await providerError(r);
   const j = await r.json();
   const raw = (j.data || j.models || []).map(m => m.id || m.name).filter(Boolean);
@@ -254,7 +267,7 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `Bearer ${token}`
+      ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
     body: JSON.stringify({ model, messages, temperature: 0.2 }),
     timeoutMs: 90000

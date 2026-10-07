@@ -110,6 +110,7 @@ export function createAiKernel(options = {}) {
     lastChecked: k.lastChecked || null,
     lastUsed: k.lastUsed || null,
     lastError: k.lastError || null,
+    baseUrl: k.provider === 'custom' ? (k.baseUrl || null) : null,
     createdAt: k.createdAt,
     useCount: k.useCount || 0
   });
@@ -265,8 +266,9 @@ export function createAiKernel(options = {}) {
                 const live = local.baseUrl?.() || providers.local?.baseUrl;
                 if (live) p.baseUrl = live;
               }
+              const providerForKey = k.baseUrl ? { ...p, baseUrl: k.baseUrl } : p;
               result = await chatProvider(
-                p, token, chosen,
+                providerForKey, token, chosen,
                 [{ role: 'system', content: contextSystem }, { role: 'user', content: message }],
                 fetchImpl
               );
@@ -440,10 +442,11 @@ export function createAiKernel(options = {}) {
         return state.keys.filter(k => !provider || k.provider === provider).map(publicKey);
       },
 
-      async addKey({ provider, token, model }) {
+      async addKey({ provider, token, model, baseUrl }) {
         await loadState();
         if (!providers[provider]) throw Object.assign(new Error('UNKNOWN_PROVIDER'), { statusCode: 400 });
-        if (provider !== 'local' && !token?.trim()) throw Object.assign(new Error('TOKEN_REQUIRED'), { statusCode: 400 });
+        if (!['local','custom'].includes(provider) && !token?.trim()) throw Object.assign(new Error('TOKEN_REQUIRED'), { statusCode: 400 });
+        if (provider === 'custom' && !String(baseUrl || '').trim()) throw Object.assign(new Error('CUSTOM_BASE_URL_REQUIRED'), { statusCode: 400 });
 
         // Detect mismatched token prefixes and warn via logs (still allow explicit provider).
         const hint = detectProviderHint(token);
@@ -457,7 +460,7 @@ export function createAiKernel(options = {}) {
         const masked = provider === 'local' ? 'LOCAL' : `${token.slice(0, 4)}...${token.slice(-4)}`;
         const key = {
           id, provider, masked, status: 'TEST_REQUIRED', models: [],
-          selectedModel: model || null, createdAt: new Date().toISOString(),
+          selectedModel: model || null, baseUrl: provider === 'custom' ? String(baseUrl || '').trim().replace(/\/$/, '') : null, createdAt: new Date().toISOString(),
           lastChecked: null, lastError: null, retryAt: 0, useCount: 0
         };
         state.keys.push(key);
@@ -490,7 +493,7 @@ export function createAiKernel(options = {}) {
             if (!localInfo.available) throw new Error(localInfo.error || 'LOCAL_UNAVAILABLE');
             models = localInfo.models || [];
           } else {
-            models = await listModels(p, token, fetchImpl);
+            models = await listModels(k.baseUrl ? { ...p, baseUrl: k.baseUrl } : p, token, fetchImpl);
           }
           k.models = models.length ? models.filter(isChatCapableModel) : (p.models || []).filter(isChatCapableModel);
           k.status = k.provider === 'local' && !k.models.length ? 'ERROR' : 'ACTIVE';
@@ -728,6 +731,7 @@ export function createAiKernel(options = {}) {
         };
         state.gatewayTokens = state.gatewayTokens || [];
         state.gatewayTokens.push(entry);
+        await vault.set(`gateway:${id}`, raw);
         await saveState();
         await logger.write('gateway.token.created', 'info', { tokenId: id, name: entry.name, type: kind });
         return {
@@ -920,8 +924,100 @@ export function createAiKernel(options = {}) {
     }
   };
 
+  const backup = {
+    async exportEncrypted(passphrase) {
+      await loadState();
+      const password = String(passphrase || '');
+      if (password.length < 8) throw Object.assign(new Error('BACKUP_PASSWORD_TOO_SHORT'), { statusCode: 400 });
+      const secrets = {};
+      for (const k of state.keys || []) {
+        if (k.provider === 'local') continue;
+        const secret = await vault.get(k.id);
+        if (secret) secrets[`key:${k.id}`] = secret;
+      }
+      for (const t of state.gatewayTokens || []) {
+        const raw = await vault.get(`gateway:${t.id}`);
+        if (raw) secrets[`gateway:${t.id}`] = raw;
+      }
+      const payload = {
+        format: 'personal-ai-hub-backup',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        state: {
+          keys: (state.keys || []).map(k => ({ ...k })),
+          routing: state.routing || {},
+          config: state.config || {},
+          gatewayTokens: (state.gatewayTokens || []).map(t => ({ ...t, _lastPersist: 0 }))
+        },
+        secrets
+      };
+      const salt = crypto.randomBytes(16);
+      const iv = crypto.randomBytes(12);
+      const key = crypto.pbkdf2Sync(password, salt, 210000, 32, 'sha256');
+      const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+      const data = Buffer.from(JSON.stringify(payload), 'utf8');
+      const encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
+      return {
+        format: 'personal-ai-hub-backup', version: 1,
+        kdf: 'PBKDF2-SHA256', iterations: 210000,
+        salt: salt.toString('base64'), iv: iv.toString('base64'),
+        tag: cipher.getAuthTag().toString('base64'),
+        data: encrypted.toString('base64')
+      };
+    },
+    async importEncrypted(backup, passphrase) {
+      const password = String(passphrase || '');
+      if (password.length < 8) throw Object.assign(new Error('BACKUP_PASSWORD_TOO_SHORT'), { statusCode: 400 });
+      if (!backup || backup.format !== 'personal-ai-hub-backup' || Number(backup.version) !== 1) {
+        throw Object.assign(new Error('INVALID_BACKUP_FILE'), { statusCode: 400 });
+      }
+      try {
+        const key = crypto.pbkdf2Sync(password, Buffer.from(backup.salt, 'base64'), Number(backup.iterations || 210000), 32, 'sha256');
+        const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(backup.iv, 'base64'));
+        decipher.setAuthTag(Buffer.from(backup.tag, 'base64'));
+        const clear = Buffer.concat([decipher.update(Buffer.from(backup.data, 'base64')), decipher.final()]);
+        const payload = JSON.parse(clear.toString('utf8'));
+        if (payload.format !== 'personal-ai-hub-backup') throw new Error('INVALID_BACKUP_PAYLOAD');
+        await loadState();
+        const importedKeys = Array.isArray(payload.state?.keys) ? payload.state.keys : [];
+        const secrets = payload.secrets && typeof payload.secrets === 'object' ? payload.secrets : {};
+        const existing = new Map((state.keys || []).map(k => [k.id, k]));
+        for (const rawKey of importedKeys) {
+          if (!rawKey?.id || !providers[rawKey.provider]) continue;
+          const copy = { ...rawKey, retryAt: 0 };
+          if (copy.provider !== 'local') {
+            const secret = secrets[`key:${copy.id}`];
+            if (!secret) continue;
+            await vault.set(copy.id, secret);
+          }
+          existing.set(copy.id, copy);
+        }
+        state.keys = [...existing.values()];
+        state.routing = { ...(state.routing || {}), ...(payload.state?.routing || {}) };
+        state.config = { ...(state.config || {}), ...(payload.state?.config || {}) };
+        const gatewayExisting = new Map((state.gatewayTokens || []).map(t => [t.id, t]));
+        for (const rawToken of (Array.isArray(payload.state?.gatewayTokens) ? payload.state.gatewayTokens : [])) {
+          if (!rawToken?.id) continue;
+          const raw = secrets[`gateway:${rawToken.id}`];
+          if (!raw) continue;
+          const copy = { ...rawToken, _lastPersist: 0, hash: crypto.createHash('sha256').update(raw).digest('hex') };
+          gatewayExisting.set(copy.id, copy);
+          await vault.set(`gateway:${copy.id}`, raw);
+        }
+        state.gatewayTokens = [...gatewayExisting.values()];
+        await saveState();
+        await logger.write('backup.imported', 'info', { keyCount: state.keys.length, gatewayTokenCount: state.gatewayTokens.length });
+        return { ok: true, keys: state.keys.length, gatewayTokens: state.gatewayTokens.length };
+      } catch (err) {
+        await logger.write('backup.import.failed', 'error', { error: safeError(err) });
+        throw Object.assign(new Error('BACKUP_PASSWORD_OR_FILE_INVALID'), { statusCode: 400 });
+      }
+    }
+  };
+
   return {
     ...kernel,
+    backup,
     mount(app, prefix = '/ai', opts = {}) {
       mountKernel(app, { prefix, kernel: this, requireAdmin: opts.requireAdmin || null });
     }

@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { mkdir } from 'node:fs/promises';
 import crypto from 'node:crypto';
+import { createRequire } from 'node:module';
 import { createAiKernel, createActionRegistry, createJsonFileStore } from './ai-app-kernel/src/index.js';
 import { ensureOllama } from './start-ollama.js';
 import { mountOpenAICompat } from './openai-compat.js';
@@ -61,50 +62,15 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: '2mb' }));
 
-// SoloHost Feedback Hub — defaults embedded (env can override)
-const SHFH_DEFAULTS = {
-  hubId: process.env.SHFH_HUB_ID || 'SHFH-CANNOI-0905428801',
-  hubUrl: (process.env.SHFH_HUB_URL || 'http://14.176.78.46:8090').replace(/\/$/, ''),
-  ingestToken: process.env.SHFH_INGEST_TOKEN || 'cannoi_7Kp9xV2mQ8rN4tY6cL3wA5zD1eF0uH9',
-  appId: process.env.SHFH_APP_ID || 'personal-ai-hub',
-  appName: process.env.SHFH_APP_NAME || 'Personal AI Hub',
-  version: process.env.npm_package_version || '1.8.1',
-  enabled: process.env.SHFH_ENABLED !== '0'
-};
-app.get('/api/shfh-config', (_req, res) => {
-  const hubUrl = SHFH_DEFAULTS.hubUrl;
-  res.json({
-    hubId: SHFH_DEFAULTS.hubId,
-    hubUrl,
-    formUrl: hubUrl + '/feedback',
-    ingestToken: SHFH_DEFAULTS.ingestToken,
-    appId: SHFH_DEFAULTS.appId,
-    appName: SHFH_DEFAULTS.appName,
-    version: SHFH_DEFAULTS.version,
-    platform: 'solohost',
-    enabled: SHFH_DEFAULTS.enabled
-  });
+// Universal Feedback Hub module — server-only credentials; never exposed to the browser.
+const require = createRequire(import.meta.url);
+const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-module/feedback-service.cjs');
+const feedbackService = createFeedbackService({
+  appId: 'personal-ai-hub',
+  appName: 'Personal AI Hub',
+  version: '1.8.3'
 });
-app.post('/api/shfh-proxy', express.json({ limit: '32kb' }), async (req, res) => {
-  if (!SHFH_DEFAULTS.enabled) return res.status(503).json({ error: 'SHFH_DISABLED' });
-  const path = String(req.body?.path || '').replace(/^\/+/, '');
-  if (!path.startsWith('api/')) return res.status(400).json({ error: 'INVALID_PATH' });
-  try {
-    const r = await fetch(SHFH_DEFAULTS.hubUrl + '/' + path, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'application/json',
-        Authorization: 'Bearer ' + SHFH_DEFAULTS.ingestToken
-      },
-      body: JSON.stringify(req.body?.payload || {})
-    });
-    const text = await r.text();
-    res.status(r.status).type('application/json').send(text || '{}');
-  } catch (e) {
-    res.status(502).json({ error: 'SHFH_PROXY_FAILED', message: String(e?.message || e) });
-  }
-});
+mountFeedbackRoutes(app, feedbackService);
 
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -310,7 +276,7 @@ app.get('/api/v1/gateway', (req, res) => {
   res.json({
     service: SERVICE_NAME,
     role: 'solohost-ai-gateway',
-    version: process.env.npm_package_version || '1.7.1',
+    version: process.env.npm_package_version || '1.8.3',
     openaiCompatible: true,
     defaultModel: 'auto',
     connections: {
