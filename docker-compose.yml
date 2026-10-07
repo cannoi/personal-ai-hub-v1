@@ -1,6 +1,5 @@
-# Personal AI Hub — public OpenAI-compatible gateway
-# Fixed host port 59971 → container 8080
-# Third-party apps: http://<PUBLIC_IP>:59971/v1
+# Personal AI Hub — SoloHost install
+# OpenAI-compatible gateway: http://YOUR_IP:${HOST_PORT}/v1
 
 services:
   personal-ai-hub:
@@ -13,16 +12,11 @@ services:
       pi.ui.primary: "true"
       pi.ai.gateway: "true"
       pi.ai.openai_path: "/v1"
-      pi.ai.public_port: "59971"
     ports:
-      - "59971:8080"
+      - "${HOST_PORT}:8080"
     environment:
       AI_HUB_ADMIN_PASSWORD: "${AI_HUB_ADMIN_PASSWORD}"
-      # Fixed published port for stable remote / third-party access
-      HOST_PORT: "${HOST_PORT:-59971}"
-      # Optional full public base, e.g. http://203.0.113.10:59971 (no trailing /v1)
-      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
-      AI_HUB_PUBLIC_URL: "${AI_HUB_PUBLIC_URL:-}"
+      HOST_PORT: "${HOST_PORT}"
       PORT: "8080"
       SERVICE_NAME: "personal-ai-hub"
       DATA_DIR: "/app/data"

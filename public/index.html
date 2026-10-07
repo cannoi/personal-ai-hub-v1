@@ -515,7 +515,7 @@
       const saveBtn = document.getElementById('save-key-btn');
       if (provider === 'custom') {
         $('aiFab')?.click();
-        setTimeout(() => { document.querySelector('#aiPanel .tab[data-tab=\"settings\"]')?.click(); const s=$('setProvider'); if(s){s.value='custom'; s.dispatchEvent(new Event('change'));} }, 0);
+        setTimeout(() => { document.querySelector('#aiPanel .tab[data-tab="settings"]')?.click(); const s=$('setProvider'); if(s){s.value='custom'; s.dispatchEvent(new Event('change'));} }, 0);
         return;
       }
       
@@ -744,10 +744,8 @@
   if ($('chat-back-hub')) $('chat-back-hub').onclick = showHub;
   if ($('refresh-hub')) $('refresh-hub').onclick = () => { refreshDashboard(); refreshGateway(); };
   if ($('open-ai-panel')) $('open-ai-panel').onclick = () => $('aiFab')?.click();
-  // The Universal AI panel is the single AI settings/log surface. Keep the legacy panel unreachable to avoid duplicate AI configuration paths.
-  if ($('settings-btn')) $('settings-btn').onclick = () => { $('aiFab')?.click(); setTimeout(() => document.querySelector('#aiPanel .tab[data-tab=\"settings\"]')?.click(), 0); };
-  if ($('open-logs')) $('open-logs').onclick = () => { $('aiFab')?.click(); setTimeout(() => document.querySelector('#aiPanel .tab[data-tab=\"logs\"]')?.click(), 0); };
-  if ($('chat-nav-btn')) $('chat-nav-btn').onclick = () => { $('aiFab')?.click(); setTimeout(() => document.querySelector('#aiPanel .tab[data-tab=\"chat\"]')?.click(), 0); };
+  // settings-btn / open-logs / chat-nav-btn already bound above (settings-panel, showChat).
+  // Do not overwrite them — that previously made Settings/Chat appear dead when the AI panel script failed.
 
   async function refreshGateway(){
     try {
@@ -763,14 +761,17 @@
           (tryList.length > 1 ? '<div class="mt-1 text-[10px] text-slate-600">Fallback: ' + esc(tryList.slice(0,4).join(' → ')) + '</div>' : '');
       }
       if ($('gw-curl-sample')) {
-        $('gw-curl-sample').textContent =
-          '# Third-party / remote (public fixed port)\\n' +
-          'curl -s ' + pub + '/models -H "Authorization: Bearer pah_YOUR_TOKEN"\\n\\n' +
-          'curl -s -X POST ' + pub + '/chat/completions \\\\\\n' +
-          '  -H "Content-Type: application/json" \\\\\\n' +
-          '  -H "Authorization: Bearer pah_YOUR_TOKEN" \\\\\\n' +
-          '  -H "X-SoloHost-App-ID: my-app" \\\\\\n' +
-          "  -d '{\\"model\\":\\"auto\\",\\"messages\\":[{\\"role\\":\\"user\\",\\"content\\":\\"hello\\"}]}'";
+        var sample = [
+          '# Third-party / remote (public fixed port)',
+          'curl -s ' + pub + '/models -H "Authorization: Bearer pah_YOUR_TOKEN"',
+          '',
+          'curl -s -X POST ' + pub + '/chat/completions \\',
+          '  -H "Content-Type: application/json" \\',
+          '  -H "Authorization: Bearer pah_YOUR_TOKEN" \\',
+          '  -H "X-SoloHost-App-ID: my-app" \\',
+          "  -d '{\"model\":\"auto\",\"messages\":[{\"role\":\"user\",\"content\":\"hello\"}]}'"
+        ].join('\\n');
+        $('gw-curl-sample').textContent = sample;
       }
       if ($('gateway-health')) $('gateway-health').textContent = 'Gateway ' + pub + ' · port ' + port;
       if ($('copy-gw-base')) $('copy-gw-base').dataset.url = pub;
