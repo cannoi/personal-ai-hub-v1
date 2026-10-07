@@ -1,44 +1,38 @@
-# SoloHost AI Gateway — connect App Builder & other apps
+# SoloHost / remote AI Gateway
 
-## Recommended Base URL (try in order)
+## Fixed public endpoint
 
-1. **Same URL you open the Hub UI with** + `/v1`  
-   Example: Hub UI is `http://192.168.1.10:62117` → Base URL = `http://192.168.1.10:62117/v1`
-
-2. **Docker DNS** (only if both apps share a network):  
-   `http://personal-ai-hub:8080/v1`
-
-3. **Host gateway** (when DNS fails):  
-   `http://host.docker.internal:<HOST_PORT>/v1`  
-   Alternatives: `host.containers.internal`, `172.17.0.1`
-
-## Never
-
-- `http://127.0.0.1:<port>/v1` **from another container** (points at that container, not the Hub)
-
-## App Builder fields
-
-| Field | Value |
-|-------|--------|
-| Type | OpenAI-compatible / Custom |
-| Base URL | see list above (must end with `/v1`) |
-| API Key | `pah_…` from Hub → Gateway tokens |
+| Item | Value |
+|------|--------|
+| Host port | **59971** (mapped to container 8080) |
+| OpenAI Base URL | `http://YOUR_PUBLIC_IP:59971/v1` |
+| Models | `GET /v1/models` |
+| Chat | `POST /v1/chat/completions` |
+| API Key | `pah_…` (Hub → Gateway tokens) |
 | Model | `auto` |
 
-```bash
-# Discovery (JSON)
-curl -s http://HOST:PORT/api/v1/gateway
-curl -s http://HOST:PORT/v1
+Optional SoloHost config:
 
-# Models
-curl -s http://HOST:PORT/v1/models -H "Authorization: Bearer pah_YOUR_TOKEN"
+- `HOST_PORT=59971` (default)
+- `PUBLIC_BASE_URL=http://YOUR_PUBLIC_IP:59971` (no trailing `/v1`)
 
-# Chat
-curl -s http://HOST:PORT/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer pah_YOUR_TOKEN" \
-  -H "X-SoloHost-App-ID: app-builder" \
-  -d '{"model":"auto","messages":[{"role":"user","content":"hello"}]}'
-```
+## App Builder
 
-Optional SoloHost config: set `HOST_PORT` and/or `PUBLIC_BASE_URL` so discovery advertises the correct host-gateway URL.
+1. Type: OpenAI-compatible / Custom  
+2. Base URL: `http://YOUR_PUBLIC_IP:59971/v1`  
+3. API Key: create in Hub UI (shown once)  
+4. Model: `auto`
+
+## Token monitoring
+
+Hub lists each `pah_` token with:
+
+- Client count (machines/apps seen)
+- Today / total requests & tokens
+- Bound appId
+- **Delete** to revoke
+
+## Do not use
+
+- `http://127.0.0.1:…` from another container  
+- Base URL without `/v1`

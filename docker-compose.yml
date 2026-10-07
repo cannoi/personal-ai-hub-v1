@@ -1,6 +1,6 @@
-# Personal AI Hub — SoloHost AI Gateway
-# Other apps call OpenAI-compatible API at http://<reachable-host>/v1
-# DNS "personal-ai-hub" only works when the caller joins the same Docker network.
+# Personal AI Hub — public OpenAI-compatible gateway
+# Fixed host port 59971 → container 8080
+# Third-party apps: http://<PUBLIC_IP>:59971/v1
 
 services:
   personal-ai-hub:
@@ -13,13 +13,14 @@ services:
       pi.ui.primary: "true"
       pi.ai.gateway: "true"
       pi.ai.openai_path: "/v1"
+      pi.ai.public_port: "59971"
     ports:
-      # SoloHost maps a host port → 8080. Use that host port (or host.docker.internal:PORT) from other containers.
-      - "8080"
+      - "59971:8080"
     environment:
       AI_HUB_ADMIN_PASSWORD: "${AI_HUB_ADMIN_PASSWORD}"
-      # Optional: set to the SoloHost published host port so discovery can advertise host.docker.internal:PORT
-      HOST_PORT: "${HOST_PORT:-}"
+      # Fixed published port for stable remote / third-party access
+      HOST_PORT: "${HOST_PORT:-59971}"
+      # Optional full public base, e.g. http://203.0.113.10:59971 (no trailing /v1)
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-}"
       AI_HUB_PUBLIC_URL: "${AI_HUB_PUBLIC_URL:-}"
       PORT: "8080"

@@ -66,6 +66,11 @@ function isBrowserSameOrigin(req) {
 }
 
 export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub' }) {
+  const clientFromReq = (req) => ({
+    ip: String(req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '').split(',')[0].trim() || null,
+    ua: String(req.headers['user-agent'] || '').slice(0, 120) || null
+  });
+
   if (!app || typeof app.get !== 'function') {
     throw new Error('mountOpenAICompat requires an Express-like app');
   }
@@ -79,7 +84,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       if (/INVALID_GATEWAY|AUTH|MISSING_GATEWAY/i.test(message)) status = 401;
       try {
         if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
-        if (req.gatewayTokenId) await kernel.gateway.recordUsage({ tokenId: req.gatewayTokenId, appId: req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || null, error: true });
+        if (req.gatewayTokenId) await kernel.gateway.recordUsage({ tokenId: req.gatewayTokenId, appId: req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || null, error: true, client: clientFromReq(req) });
         await kernel.logs.write('api.error', 'error', {
           path: req.path, method: req.method, error: message,
           appId: req.headers['x-solohost-app-id'] || null
@@ -210,7 +215,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     const started = Date.now();
     const result = await kernel.chat({ message, system: system || undefined, provider: parsed.provider || undefined, model: parsed.model || undefined, requestId, appId });
     const usage = result.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-    await kernel.gateway.recordUsage({ tokenId: req.gatewayTokenId, appId, usage, error: !!result.error });
+    await kernel.gateway.recordUsage({ tokenId: req.gatewayTokenId, appId, usage, error: !!result.error, client: clientFromReq(req) });
     if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
     const id = requestId.startsWith('chatcmpl-') ? requestId : `chatcmpl-${requestId}`;
 
@@ -300,7 +305,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     const appId = req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || null;
     const result = await kernel.chat({ message:input, system: combinedSystem || undefined, provider:parsed.provider || undefined, model:parsed.model || undefined, appId, requestId });
     const usage = result.usage || {prompt_tokens:0,completion_tokens:0,total_tokens:0};
-    await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage,error:!!result.error});
+    await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage,error:!!result.error,client:clientFromReq(req)});
     if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
     res.setHeader('X-Request-Id', requestId);
     if (result && result.error) {
@@ -354,7 +359,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     const parsed=parseModel(body.model);
     const appId=req.headers['x-solohost-app-id']||req.gatewayApp?.appId||null;
     const result=await kernel.embed({input:body.input,provider:parsed.provider||undefined,model:parsed.model||undefined,appId});
-    await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage:result.usage,error:false});
+    await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage:result.usage,error:false,client:clientFromReq(req)});
     if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
     res.setHeader('X-Request-Id',result.requestId);
     return res.json({object:'list',data:result.data||[],model:result.model||body.model,usage:result.usage||{prompt_tokens:0,total_tokens:0}});

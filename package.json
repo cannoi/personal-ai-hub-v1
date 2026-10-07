@@ -1,6 +1,6 @@
 {
   "name": "personal-ai-hub",
-  "version": "1.8.10",
+  "version": "1.8.11",
   "type": "module",
   "description": "Personal AI Hub \u2014 SoloHost AI Gateway + Universal modules v1.3.0",
   "main": "index.js",

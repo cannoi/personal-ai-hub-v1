@@ -69,7 +69,7 @@ const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-m
 const feedbackService = createFeedbackService({
   appId: 'personal-ai-hub',
   appName: 'Personal AI Hub',
-  version: '1.8.10'
+  version: '1.8.11'
 });
 mountFeedbackRoutes(app, feedbackService);
 
@@ -241,7 +241,7 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '1.8.10',
+    version: '1.8.11',
     openaiCompatible: true,
     routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });
@@ -276,15 +276,11 @@ function resolveConnectionBases(req) {
   const proto = (req.get('x-forwarded-proto') || req.protocol || 'http').split(',')[0].trim();
   const requestBase = hostHeader ? `${proto}://${hostHeader}` : null;
 
-  // Published host port (SoloHost random map e.g. 62117). Prefer explicit env.
-  let publishedPort = process.env.HOST_PORT || process.env.SOLOHOST_HOST_PORT || null;
-  if (!publishedPort && hostHeader && hostHeader.includes(':')) {
+  // Fixed public gateway port (default 59971). SoloHost maps host:59971 → container:8080.
+  let publishedPort = process.env.HOST_PORT || process.env.SOLOHOST_HOST_PORT || '59971';
+  if (hostHeader && hostHeader.includes(':')) {
     const maybe = hostHeader.split(':').pop();
     if (/^\d+$/.test(maybe) && maybe !== String(PORT)) publishedPort = maybe;
-  }
-  if (!publishedPort && hostHeader && !hostHeader.includes(':')) {
-    // default http/https — still unknown published port
-    publishedPort = null;
   }
 
   const dockerBase = `http://${SERVICE_NAME}:${PORT}`;
@@ -295,20 +291,27 @@ function resolveConnectionBases(req) {
   ];
 
   const hostGatewayBases = [];
-  if (publishedPort) {
-    for (const h of ['host.docker.internal', 'host.containers.internal', '172.17.0.1']) {
-      hostGatewayBases.push(`http://${h}:${publishedPort}`);
+  for (const h of ['host.docker.internal', 'host.containers.internal', '172.17.0.1']) {
+    hostGatewayBases.push(`http://${h}:${publishedPort}`);
+  }
+
+  // If request Host is a public IP/hostname, derive a stable public base with fixed port
+  let derivedPublic = null;
+  if (hostHeader) {
+    const hostname = hostHeader.split(':')[0];
+    if (hostname && hostname !== 'localhost' && hostname !== '127.0.0.1' && !hostname.endsWith('.internal')) {
+      derivedPublic = `${proto}://${hostname}:${publishedPort}`;
     }
   }
 
-  const externalBase = PUBLIC_BASE_URL || null;
+  const externalBase = (PUBLIC_BASE_URL || process.env.AI_HUB_PUBLIC_URL || derivedPublic || '').replace(/\/$/, '') || null;
 
-  // Prefer what the current caller already used successfully
+  // Priority for third-party / remote: PUBLIC_BASE_URL → derived public → request Host → host-gateway → docker DNS
   const ordered = [];
-  if (requestBase) ordered.push(requestBase);
   if (externalBase) ordered.push(externalBase);
-  ordered.push(...dockerAliases);
+  if (requestBase && requestBase !== externalBase) ordered.push(requestBase);
   ordered.push(...hostGatewayBases);
+  ordered.push(...dockerAliases);
 
   const unique = [...new Set(ordered.filter(Boolean))];
   return {
@@ -316,6 +319,7 @@ function resolveConnectionBases(req) {
     dockerBase,
     publishedPort,
     externalBase,
+    publicOpenaiBaseUrl: externalBase ? `${externalBase}/v1` : `http://HOST_IP:${publishedPort}/v1`,
     bases: unique,
     openaiBases: unique.map(b => `${b.replace(/\/$/, '')}/v1`)
   };
@@ -327,7 +331,7 @@ function resolveConnectionBases(req) {
  */
 app.get('/api/v1/gateway', (req, res) => {
   const c = resolveConnectionBases(req);
-  const primaryOpenai = c.openaiBases[0];
+  const primaryOpenai = c.publicOpenaiBaseUrl && !c.publicOpenaiBaseUrl.includes('HOST_IP') ? c.publicOpenaiBaseUrl : (c.openaiBases[0]);
   const dockerOpenai = `${c.dockerBase}/v1`;
   res.json({
     service: SERVICE_NAME,
@@ -337,6 +341,8 @@ app.get('/api/v1/gateway', (req, res) => {
     defaultModel: 'auto',
     /** Primary URL that worked for THIS request — copy into App Builder first */
     primaryOpenaiBaseUrl: primaryOpenai,
+    publicOpenaiBaseUrl: c.publicOpenaiBaseUrl,
+    publishedPort: c.publishedPort,
     connections: {
       thisRequest: c.requestBase ? {
         baseUrl: c.requestBase,

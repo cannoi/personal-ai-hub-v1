@@ -302,3 +302,35 @@ async function addActiveKey(kernel, provider, models, selectedModel = null) {
 }
 
 console.log('\nALL SMART ROUTER TESTS PASSED');
+
+// --- Gateway token client tracking + revoke ---
+{
+  const dir = await tmpDir();
+  const master = path.join(dir, 'master');
+  await fs.writeFile(master, 'test-master-key-32chars-minimum!!');
+  await fs.writeFile(path.join(dir, 'state.json'), JSON.stringify({
+    keys: [], memory: [], routing: {}, config: {}, gatewayTokens: [], gatewayUsage: {}
+  }));
+  const kernel = await makeKernel(dir, async () => ({ ok: true, status: 200, text: async () => '', json: async () => ({}) }));
+  const created = await kernel.gateway.createToken({ name: 'remote-app' });
+  assert.ok(created.token.startsWith('pah_'));
+  await kernel.gateway.recordUsage({
+    tokenId: created.id, appId: 'app-builder', usage: { total_tokens: 12 },
+    client: { ip: '1.2.3.4', ua: 'TestClient/1.0' }
+  });
+  await kernel.gateway.recordUsage({
+    tokenId: created.id, appId: 'app-builder', usage: { total_tokens: 5 },
+    client: { ip: '5.6.7.8', ua: 'Other/2.0' }
+  });
+  const list = await kernel.gateway.listTokens();
+  const row = list.find(x => x.id === created.id);
+  assert.ok(row);
+  assert.equal(row.clientCount, 2);
+  assert.ok(row.usage.totalRequests >= 2);
+  assert.ok(row.usage.totalTokens >= 17);
+  await kernel.gateway.revokeToken(created.id);
+  const after = await kernel.gateway.listTokens();
+  assert.equal(after.find(x => x.id === created.id), undefined);
+  console.log('PASS gateway token clients + delete');
+  await fs.rm(dir, { recursive: true, force: true });
+}

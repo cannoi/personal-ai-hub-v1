@@ -871,17 +871,44 @@ export function createAiKernel(options = {}) {
     gateway: {
       async listTokens() {
         await loadState();
-        return (state.gatewayTokens || []).map(t => ({
-          id: t.id,
-          name: t.name,
-          prefix: t.prefix,
-          type: t.type || 'app',
-          status: t.appId ? 'bound' : 'unbound',
-          appId: t.appId || null,
-          createdAt: t.createdAt,
-          lastUsed: t.lastUsed || null,
-          limits: t.limits || null
-        }));
+        const day = new Date().toISOString().slice(0, 10);
+        return (state.gatewayTokens || []).map(t => {
+          const stats = t.stats || { requests: 0, errors: 0, totalTokens: 0, clients: {} };
+          const clients = Object.values(stats.clients || {});
+          const usageRows = Object.values(state.gatewayUsage || {}).filter(u => u.tokenId === t.id);
+          const today = usageRows.filter(u => u.period === day);
+          const todayRequests = today.reduce((n, u) => n + (u.requests || 0), 0);
+          const todayTokens = today.reduce((n, u) => n + (u.totalTokens || 0), 0);
+          return {
+            id: t.id,
+            name: t.name,
+            prefix: t.prefix,
+            type: t.type || 'app',
+            status: t.appId ? 'bound' : 'unbound',
+            appId: t.appId || null,
+            createdAt: t.createdAt,
+            lastUsed: t.lastUsed || null,
+            limits: t.limits || null,
+            clientCount: clients.length,
+            clients: clients
+              .sort((a, b) => String(b.lastSeen || '').localeCompare(String(a.lastSeen || '')))
+              .slice(0, 20)
+              .map(c => ({
+                appId: c.appId || null,
+                ip: c.ip || null,
+                ua: c.ua ? String(c.ua).slice(0, 80) : null,
+                requests: c.requests || 0,
+                lastSeen: c.lastSeen || null
+              })),
+            usage: {
+              totalRequests: stats.requests || 0,
+              totalErrors: stats.errors || 0,
+              totalTokens: stats.totalTokens || 0,
+              todayRequests,
+              todayTokens
+            }
+          };
+        });
       },
       async createToken({ name, type = 'app', limits = {} } = {}) {
         await loadState();
@@ -918,9 +945,16 @@ export function createAiKernel(options = {}) {
       async revokeToken(id) {
         await loadState();
         state.gatewayTokens = (state.gatewayTokens || []).filter(t => t.id !== id);
+        // Drop usage rows for this token
+        for (const k of Object.keys(state.gatewayUsage || {})) {
+          if (k.startsWith(id + ':') || (state.gatewayUsage[k] && state.gatewayUsage[k].tokenId === id)) {
+            delete state.gatewayUsage[k];
+          }
+        }
+        try { await vault.del?.(`gateway:${id}`); } catch {}
         await saveState();
         await logger.write('gateway.token.revoked', 'info', { tokenId: id });
-        return { success: true };
+        return { success: true, deleted: id };
       },
       async unbindToken(id) {
         await loadState();
@@ -1015,7 +1049,7 @@ export function createAiKernel(options = {}) {
         if ((limits.dailyTokens && dayTokens >= limits.dailyTokens) || (limits.monthlyTokens && monthTokens >= limits.monthlyTokens)) { slot.release(); const e = new Error('USAGE_QUOTA_EXCEEDED'); e.statusCode=429; e.retryAfter=60; throw e; }
         return { ...ok, slot, limits };
       },
-      async recordUsage({ tokenId, appId = null, usage = null, error = false } = {}) {
+      async recordUsage({ tokenId, appId = null, usage = null, error = false, client = null } = {}) {
         if (!tokenId) return;
         await loadState();
         const day = new Date().toISOString().slice(0,10);
@@ -1026,6 +1060,31 @@ export function createAiKernel(options = {}) {
         u.promptTokens += Number(usage?.prompt_tokens || 0);
         u.completionTokens += Number(usage?.completion_tokens || 0);
         u.totalTokens += Number(usage?.total_tokens || 0);
+
+        const tok = (state.gatewayTokens || []).find(x => x.id === tokenId);
+        if (tok) {
+          tok.lastUsed = new Date().toISOString();
+          tok.stats = tok.stats || { requests: 0, errors: 0, totalTokens: 0, clients: {} };
+          tok.stats.requests = (tok.stats.requests || 0) + 1;
+          if (error) tok.stats.errors = (tok.stats.errors || 0) + 1;
+          tok.stats.totalTokens = (tok.stats.totalTokens || 0) + Number(usage?.total_tokens || 0);
+          const ip = client?.ip || null;
+          const ua = client?.ua || null;
+          const fingerprint = [appId || '', ip || '', (ua || '').slice(0, 40)].join('|') || 'unknown';
+          const c = tok.stats.clients[fingerprint] ||= {
+            appId: appId || null, ip, ua: ua ? String(ua).slice(0, 120) : null,
+            requests: 0, lastSeen: null
+          };
+          c.requests += 1;
+          c.lastSeen = tok.lastUsed;
+          c.appId = appId || c.appId;
+          // Cap stored clients per token
+          const keys = Object.keys(tok.stats.clients);
+          if (keys.length > 50) {
+            const sorted = keys.sort((a, b) => String(tok.stats.clients[a].lastSeen || '').localeCompare(String(tok.stats.clients[b].lastSeen || '')));
+            for (const k of sorted.slice(0, keys.length - 50)) delete tok.stats.clients[k];
+          }
+        }
         await saveState();
       },
     },
