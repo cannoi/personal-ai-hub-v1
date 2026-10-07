@@ -68,7 +68,7 @@ const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-m
 const feedbackService = createFeedbackService({
   appId: 'personal-ai-hub',
   appName: 'Personal AI Hub',
-  version: '1.8.3'
+  version: '1.8.6'
 });
 mountFeedbackRoutes(app, feedbackService);
 
@@ -237,7 +237,7 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '1.7.1',
+    version: '1.8.6',
     openaiCompatible: true,
     routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });
@@ -276,7 +276,7 @@ app.get('/api/v1/gateway', (req, res) => {
   res.json({
     service: SERVICE_NAME,
     role: 'solohost-ai-gateway',
-    version: process.env.npm_package_version || '1.8.3',
+    version: process.env.npm_package_version || '1.8.5',
     openaiCompatible: true,
     defaultModel: 'auto',
     connections: {

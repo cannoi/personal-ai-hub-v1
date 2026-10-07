@@ -6,7 +6,7 @@
 'use strict';
 const path = require('path');
 const fs = require('fs');
-const {runProvider, listModels, testProvider} = require('./provider-engine.cjs');
+const {runProvider, listModels, testProvider} = require('./provider-engine');
 
 const DEFAULT_PROVIDERS = [
   { id:'openai', name:'OpenAI', kind:'openai', baseUrl:'https://api.openai.com/v1' },
@@ -147,7 +147,7 @@ function createAIService(options={}) {
       if (settings.model !== 'auto' && (e.status === 404 || /model.*(not found|does not exist|not available)|not_found/i.test(e.message))) {
         try {
           const models=await listModels(engineArgs());
-          const {chooseAutoModel}=require('./provider-engine.cjs');
+          const {chooseAutoModel}=require('./provider-engine');
           const fallback=chooseAutoModel(models,settings.provider);
           if (fallback && fallback !== settings.model && fallback !== 'auto') {
             raw=await runProvider(engineArgs({model:fallback,messages:msgs,meta}));

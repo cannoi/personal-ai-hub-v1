@@ -169,6 +169,39 @@ export async function listModels(provider, token, fetchImpl = fetch) {
   return rankChatModels(raw);
 }
 
+function extractTextContent(content) {
+  if (content == null) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(part => {
+      if (typeof part === 'string') return part;
+      if (!part || typeof part !== 'object') return '';
+      if (typeof part.text === 'string') return part.text;
+      if (part.type === 'output_text' && typeof part.text === 'string') return part.text;
+      if (part.type === 'text' && typeof part.text === 'string') return part.text;
+      return '';
+    }).join('');
+  }
+  if (typeof content === 'object') {
+    if (typeof content.text === 'string') return content.text;
+    if (typeof content.value === 'string') return content.value;
+  }
+  return String(content);
+}
+
+function extractOpenAICompatibleReply(body) {
+  const choice = body?.choices?.[0];
+  const messageContent = extractTextContent(choice?.message?.content);
+  if (messageContent.trim()) return messageContent;
+  const choiceText = extractTextContent(choice?.text);
+  if (choiceText.trim()) return choiceText;
+  const outputText = extractTextContent(body?.output_text);
+  if (outputText.trim()) return outputText;
+  const output = Array.isArray(body?.output) ? body.output : [];
+  const outputContent = output.flatMap(item => Array.isArray(item?.content) ? item.content : [item?.content]).map(part => extractTextContent(part)).join('');
+  return outputContent;
+}
+
 export async function chatProvider(provider, token, model, messages, fetchImpl = fetch) {
   if (provider.type === 'ollama') {
     // CPU / Pi SoloHost: first token can be very slow. Allow up to 10 minutes.
@@ -275,9 +308,10 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
   if (!r.ok) throw await providerError(r);
   const j = await r.json();
   return {
-    reply: j.choices?.[0]?.message?.content || '',
+    reply: extractOpenAICompatibleReply(j),
     model: j.model || model,
-    usage: { prompt_tokens: Number(j.usage?.prompt_tokens || 0), completion_tokens: Number(j.usage?.completion_tokens || 0), total_tokens: Number(j.usage?.total_tokens || 0) }
+    usage: { prompt_tokens: Number(j.usage?.prompt_tokens || 0), completion_tokens: Number(j.usage?.completion_tokens || 0), total_tokens: Number(j.usage?.total_tokens || 0) },
+    finishReason: j.choices?.[0]?.finish_reason || null
   };
 }
 

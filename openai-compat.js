@@ -26,7 +26,7 @@ function parseModel(model) {
   const m = raw.match(/^([a-z0-9_-]+)[/:|](.+)$/i);
   if (m) {
     const prov = m[1].toLowerCase();
-    const known = ['local', 'ollama', 'openai', 'gemini', 'google', 'deepseek', 'groq', 'openrouter', 'anthropic', 'claude'];
+    const known = ['local', 'ollama', 'openai', 'gemini', 'google', 'deepseek', 'groq', 'openrouter', 'anthropic', 'claude', 'mistral', 'xai', 'custom'];
     if (known.includes(prov)) {
       const map = { ollama: 'local', google: 'gemini', claude: 'anthropic' };
       return { provider: map[prov] || prov, model: m[2], auto: false };
@@ -41,7 +41,7 @@ function messagesToPrompt(messages) {
   const transcript = [];
   for (const msg of list) {
     const role = String(msg?.role || 'user');
-    const text = extractText(msg?.content).trim();
+    const text = extractText(msg?.content ?? msg?.text).trim();
     if (!text) continue;
     if (role === 'system') system = system ? `${system}\n${text}` : text;
     else if (role === 'assistant') transcript.push(`Assistant: ${text}`);
@@ -254,7 +254,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
 
     const payload = {
       id, object: 'chat.completion', created: Math.floor(Date.now()/1000), model: result.model || body.model || 'auto',
-      choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop', logprobs: null }],
+      choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: result.finishReason || 'stop', logprobs: null }],
       usage,
       personal_ai_hub: { provider: result.provider || null, keyId: result.keyId || null, requestId: result.requestId || requestId, latencyMs: Date.now()-started, appId }
     };
@@ -265,7 +265,10 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       res.setHeader('Connection', 'keep-alive');
       const chunk = { id, object:'chat.completion.chunk', created:payload.created, model:payload.model, choices:[{index:0,delta:{role:'assistant',content:result.reply||''},finish_reason:null}] };
       res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-      res.write(`data: ${JSON.stringify({...chunk, choices:[{index:0,delta:{},finish_reason:'stop'}]})}\n\n`);
+      res.write(`data: ${JSON.stringify({...chunk, choices:[{index:0,delta:{},finish_reason:result.finishReason || 'stop'}]})}\n\n`);
+      if (body.stream_options?.include_usage === true) {
+        res.write(`data: ${JSON.stringify({id,object:'chat.completion.chunk',created:payload.created,model:payload.model,choices:[],usage})}\n\n`);
+      }
       res.write(`data: [DONE]\n\n`);
       return res.end();
     }
@@ -275,12 +278,27 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
 
   const responses = asyncRoute(async (req, res) => {
     const body = req.body || {};
-    const input = typeof body.input === 'string' ? body.input : (Array.isArray(body.input) ? body.input.map(x => typeof x === 'string' ? x : extractText(x?.content || x)).join('\n') : '');
+    let messages = [];
+    if (typeof body.input === 'string') {
+      messages = [{ role: 'user', content: body.input }];
+    } else if (Array.isArray(body.input)) {
+      messages = body.input.map(item => {
+        if (typeof item === 'string') return { role: 'user', content: item };
+        if (item && typeof item === 'object') {
+          const role = ['system','developer','user','assistant'].includes(String(item.role)) ? String(item.role) : 'user';
+          return { role: role === 'developer' ? 'system' : role, content: item.content ?? item.text ?? '' };
+        }
+        return { role: 'user', content: '' };
+      });
+    }
+    const { message: input, system: inputSystem } = messagesToPrompt(messages);
+    const instructions = typeof body.instructions === 'string' ? body.instructions.trim() : '';
+    const combinedSystem = [instructions, inputSystem].filter(Boolean).join('\n\n');
     if (!input.trim()) return res.status(400).json({ error:{message:'input required',type:'invalid_request_error',code:'INPUT_REQUIRED'} });
     const parsed = parseModel(body.model);
     const requestId = req.headers['x-request-id'] || `resp-${randomUUID().replace(/-/g,'').slice(0,24)}`;
     const appId = req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || null;
-    const result = await kernel.chat({ message:input, system: typeof body.instructions === 'string' ? body.instructions : undefined, provider:parsed.provider || undefined, model:parsed.model || undefined, appId, requestId });
+    const result = await kernel.chat({ message:input, system: combinedSystem || undefined, provider:parsed.provider || undefined, model:parsed.model || undefined, appId, requestId });
     const usage = result.usage || {prompt_tokens:0,completion_tokens:0,total_tokens:0};
     await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage,error:!!result.error});
     if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
@@ -311,7 +329,23 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
         }
       });
     }
-    return res.json({ id:requestId, object:'response', created_at:Math.floor(Date.now()/1000), model:result.model || body.model || 'auto', output:[{id:`msg_${randomUUID().replace(/-/g,'').slice(0,20)}`,type:'message',role:'assistant',content:[{type:'output_text',text}]}], status:'completed', usage });
+    const responseId = requestId.startsWith('resp-') ? requestId : `resp-${requestId}`;
+    return res.json({
+      id: responseId,
+      object: 'response',
+      created_at: Math.floor(Date.now()/1000),
+      model: result.model || body.model || 'auto',
+      output: [{
+        id: `msg_${randomUUID().replace(/-/g,'').slice(0,20)}`,
+        type: 'message',
+        role: 'assistant',
+        status: 'completed',
+        content: [{ type: 'output_text', text }]
+      }],
+      output_text: text,
+      status: 'completed',
+      usage
+    });
   });
 
   const embeddings = asyncRoute(async (req, res) => {

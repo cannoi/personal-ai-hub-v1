@@ -95,7 +95,7 @@ const fetchImpl = async (url) => {
   if (u.includes('/api/tags')) return new Response(JSON.stringify({ models: [{ name: 'qwen2.5-coder:1.5b' }] }), { status: 200 });
   if (u.includes('/api/chat')) return new Response(JSON.stringify({ message: { content: 'local-hello' }, model: 'qwen2.5-coder:1.5b' }), { status: 200 });
   if (u.includes('/models')) return new Response(JSON.stringify({ data: [{ id: 'gpt-4o-mini' }] }), { status: 200 });
-  if (u.includes('/chat/completions')) return new Response(JSON.stringify({ choices: [{ message: { content: 'cloud-hello' } }], model: 'gpt-4o-mini' }), { status: 200 });
+  if (u.includes('/chat/completions')) return new Response(JSON.stringify({ choices: [{ message: { content: [{ type: 'text', text: 'cloud-hello' }] } }], model: 'gpt-4o-mini' }), { status: 200 });
   return new Response(JSON.stringify({ error: 'nf' }), { status: 404 });
 };
 
