@@ -64,11 +64,12 @@ app.use(express.json({ limit: '2mb' }));
 
 // Universal Feedback Hub module — server-only credentials; never exposed to the browser.
 const require = createRequire(import.meta.url);
+const appAdapter = require('./lib/app-adapter.cjs');
 const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-module/feedback-service.cjs');
 const feedbackService = createFeedbackService({
   appId: 'personal-ai-hub',
   appName: 'Personal AI Hub',
-  version: '1.8.6'
+  version: '1.8.7'
 });
 mountFeedbackRoutes(app, feedbackService);
 
@@ -128,6 +129,9 @@ const actions = createActionRegistry()
   });
 
 const ai = createAiKernel({
+  knowledge: appAdapter.knowledge,
+  localReply: appAdapter.localReply,
+  getAppContext: appAdapter.getContext,
   schema,
   store,
   actions,
@@ -237,7 +241,7 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '1.8.6',
+    version: '1.8.7',
     openaiCompatible: true,
     routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });

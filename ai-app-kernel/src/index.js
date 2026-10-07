@@ -7,6 +7,9 @@ import { createLocalModelManager } from './local.js';
 import { createRateLimiter } from './security.js';
 
 export function createAiKernel(options = {}) {
+  const knowledge = options.knowledge || null;
+  const localReply = options.localReply || null;
+  const getAppContext = options.getAppContext || null;
   const schema = options.schema || { name: 'app', collections: [] };
   const store = options.store || {};
   const actions = options.actions || {};
@@ -212,6 +215,21 @@ export function createAiKernel(options = {}) {
           available: state.keys.filter(k => !provider || k.provider === provider)
             .map(k => ({ provider: k.provider, status: k.status, keyId: k.id, lastError: k.lastError }))
         });
+        if (typeof localReply === 'function') {
+          try {
+            const guide = await localReply(message, { appId: appId || 'hub-ui', reason: 'NO_ACTIVE_KEY' });
+            if (guide?.reply) {
+              return {
+                reply: guide.reply,
+                provider: guide.provider || 'local-guide',
+                model: guide.model || 'offline-manual',
+                offline: true,
+                needsUserAction: true,
+                requestId
+              };
+            }
+          } catch {}
+        }
         return {
           reply: '',
           error: 'NO_ACTIVE_KEY',
@@ -223,8 +241,12 @@ export function createAiKernel(options = {}) {
 
       await loadState();
       const memories = state.memory.slice(-10).map(x => `${x.role}: ${x.content}`).join('\n');
+      const appKnowledge = (typeof knowledge === 'string' && knowledge.trim())
+        ? knowledge.trim()
+        : '';
       const contextSystem = [
-        system || 'You are a helpful private Personal AI Hub assistant. Be concise and useful. Reply in the user language.',
+        system || 'You are the Personal AI Hub assistant for this SoloHost AI Gateway. Guide the user using the app knowledge below. Be concise. Reply in the user language.',
+        appKnowledge ? `APP KNOWLEDGE (authoritative):\n${appKnowledge}` : '',
         memories ? `Relevant recent private interaction memory:\n${memories}` : ''
       ].filter(Boolean).join('\n\n');
 
