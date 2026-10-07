@@ -147,7 +147,12 @@ export function createAiKernel(options = {}) {
       pool = pool.filter(k => k.provider === provider);
     }
 
-    pool = pool.filter(k => !model || (k.models || []).includes(model) || k.selectedModel === model);
+    // Prefer keys that list the requested model, but do NOT drop ACTIVE keys
+    // when the client sends a stale/wrong model id (e.g. openrouter free id on gemini).
+    if (model) {
+      const matched = pool.filter(k => (k.models || []).includes(model) || k.selectedModel === model);
+      if (matched.length) pool = matched;
+    }
 
     // prefer_local: local keys first
     if (!provider && mode === 'prefer_local') {
@@ -207,7 +212,9 @@ export function createAiKernel(options = {}) {
 
       let eligible = await chooseKeys(provider, model, !provider && !strictProvider);
       if (!eligible.length) eligible = await activatePendingKeys(provider, model, requestId);
-      if (!eligible.length && !provider && !strictProvider) eligible = await chooseKeys(null, null, true);
+      // Stale sticky model on wrong provider → still use ACTIVE keys for that provider
+      if (!eligible.length && provider) eligible = await chooseKeys(provider, null, !strictProvider);
+      if (!eligible.length && !strictProvider) eligible = await chooseKeys(null, null, true);
 
       if (!eligible.length) {
         await logger.write('chat.failed', 'warn', {
@@ -259,12 +266,19 @@ export function createAiKernel(options = {}) {
         // when the key has no discovered list (avoids 404 on removed models like Groq llama-3.1-8b-instant).
         const preferred = k.selectedModel || null;
         let candidates = [];
-        if (model) candidates.push(model);
         const discovered = k.models || [];
+        // Only force client model if this key actually lists it
+        const modelOnKey = model && (
+          !discovered.length
+          || discovered.includes(model)
+          || preferred === model
+        );
+        if (modelOnKey) candidates.push(model);
         if (discovered.length) candidates.push(...discovered);
         else candidates.push(...(p.models || []));
-        candidates = rankModels(candidates, preferred);
-        if (model) candidates = [model, ...candidates.filter(m => m !== model)];
+        const stickyOk = preferred && (!discovered.length || discovered.includes(preferred));
+        candidates = rankModels(candidates, stickyOk ? preferred : null);
+        if (modelOnKey) candidates = [model, ...candidates.filter(m => m !== model)];
 
         if (!candidates.length) {
           failures.push({ provider: k.provider, reason: 'NO_MODEL' });

@@ -25,16 +25,27 @@ export function mountKernel(app, { prefix = '/ai', kernel, requireAdmin = null }
     return requireAdmin(req, res, next);
   };
 
-  /** Gateway auth for data-plane chat */
+  /** Hub browser UI must never require pah_ gateway tokens. */
+  function isHubUiRequest(req) {
+    const appId = String(req.headers['x-solohost-app-id'] || req.body?.appId || '').toLowerCase();
+    if (appId === 'hub-ui' || appId === 'personal-ai-hub') return true;
+    const origin = req.headers.origin;
+    if (!origin) return false;
+    const host = (typeof req.get === 'function' ? req.get('host') : null) || req.headers.host || '';
+    try { return new URL(origin).host === host; } catch { return false; }
+  }
+
+  /** Gateway auth for external SoloHost apps. Hub UI is exempt. */
   const gatewayAuth = async (req, res, next) => {
     try {
+      if (isHubUiRequest(req)) return next();
       const tokens = await kernel.gateway.listTokens();
       if (!tokens.length) return next();
       const hdr = req.headers['x-personal-ai-key']
         || (String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i) || [])[1]
         || req.body?.gatewayToken;
       if (!hdr) {
-        // Hub UI same-origin may omit; soft allow without Origin is OK for bootstrap of native UI
+        // Server-to-server without Origin stays open; cross-origin browsers need pah_.
         if (!req.headers.origin) return next();
         return res.status(401).json({ error: 'MISSING_GATEWAY_TOKEN' });
       }
