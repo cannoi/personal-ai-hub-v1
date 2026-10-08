@@ -783,13 +783,14 @@
     try {
       var disc = await json('/api/v1/gateway');
       var pub = disc.publicOpenaiBaseUrl || disc.primaryOpenaiBaseUrl || (location.origin + '/v1');
+      var dip = disc.detectedPublicIp || null;
       var port = disc.publishedPort || 59971;
       var tryList = (disc.recommended && disc.recommended.tryInOrder) || [pub];
       if ($('gw-base-url')) {
         $('gw-base-url').innerHTML =
           '<div class="text-emerald-300 font-medium">Public OpenAI Base URL</div>' +
           '<div class="font-mono text-sm break-all mt-1">' + esc(pub) + '</div>' +
-          '<div class="mt-2 text-[11px] text-slate-500">Port cố định: <strong class="text-slate-300">' + esc(String(port)) + '</strong> · App Builder / third-party: Type=OpenAI-compatible · Model=<code>auto</code> · Key=<code>pah_…</code></div>' +
+          '<div class="mt-2 text-[11px] text-slate-500">' + (dip ? ('Detected public IP: <strong class="text-slate-300">' + esc(dip) + '</strong> · ') : '') + 'Port cố định: <strong class="text-slate-300">' + esc(String(port)) + '</strong> · App Builder / third-party: Type=OpenAI-compatible · Model=<code>auto</code> · Key=<code>pah_…</code></div>' +
           (tryList.length > 1 ? '<div class="mt-1 text-[10px] text-slate-600">Fallback: ' + esc(tryList.slice(0,4).join(' → ')) + '</div>' : '');
       }
       if ($('gw-curl-sample')) {

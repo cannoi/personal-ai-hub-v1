@@ -107,15 +107,93 @@ export function createLocalModelManager(provider, fetchImpl = fetch) {
       }
       try {
         const data = await json('/api/tags', { timeoutMs: 6000 });
-        const models = (data.models || []).map(m => (typeof m === 'string' ? m : m.name)).filter(Boolean);
+        const rawModels = data.models || [];
+        const models = rawModels.map(m => (typeof m === 'string' ? m : m.name)).filter(Boolean);
+
+        // Running / loaded models (Ollama /api/ps)
+        let loaded = [];
+        let psError = null;
+        try {
+          const ps = await json('/api/ps', { timeoutMs: 4000 });
+          loaded = (ps.models || []).map(m => ({
+            name: m.name || m.model,
+            size: m.size || null,
+            size_vram: m.size_vram || null,
+            expires_at: m.expires_at || null,
+            details: m.details || null
+          })).filter(m => m.name);
+        } catch (e) {
+          psError = String(e?.message || e).slice(0, 120);
+        }
+        const loadedNames = new Set(loaded.map(m => m.name));
+
+        // Per-model catalog details (best-effort /api/show — capped)
+        const modelDetails = [];
+        for (const m of rawModels.slice(0, 12)) {
+          const name = typeof m === 'string' ? m : m.name;
+          if (!name) continue;
+          const base = {
+            name,
+            size: typeof m === 'object' ? (m.size || null) : null,
+            digest: typeof m === 'object' ? (m.digest || null) : null,
+            modified_at: typeof m === 'object' ? (m.modified_at || null) : null,
+            family: typeof m === 'object' ? (m.details?.family || null) : null,
+            parameter_size: typeof m === 'object' ? (m.details?.parameter_size || null) : null,
+            quantization: typeof m === 'object' ? (m.details?.quantization_level || null) : null,
+            loaded: loadedNames.has(name) || [...loadedNames].some(n => n === name || n.startsWith(name + ':') || name.startsWith(n.split(':')[0])),
+            context_window: null,
+            max_output_tokens: null
+          };
+          try {
+            const show = await json('/api/show', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name }),
+              timeoutMs: 8000
+            });
+            const params = String(show?.parameters || '');
+            const ctxMatch = params.match(/num_ctx\s+(\d+)/i) || params.match(/context[_\s-]?length\s*[:=]?\s*(\d+)/i);
+            if (ctxMatch) base.context_window = Number(ctxMatch[1]);
+            if (show?.model_info) {
+              const info = show.model_info;
+              for (const [k, v] of Object.entries(info)) {
+                if (/context_length|context_window|max_position/i.test(k) && Number(v) > 0) {
+                  base.context_window = base.context_window || Number(v);
+                }
+              }
+            }
+            if (!base.context_window && show?.details?.context_length) base.context_window = Number(show.details.context_length);
+            base.family = base.family || show?.details?.family || null;
+            base.parameter_size = base.parameter_size || show?.details?.parameter_size || null;
+            base.quantization = base.quantization || show?.details?.quantization_level || null;
+            // Defaults for local GGUF chat models when Ollama omits ctx
+            if (!base.context_window) base.context_window = 8192;
+            base.max_output_tokens = Math.min(4096, Math.floor(base.context_window / 2));
+          } catch {
+            if (!base.context_window) base.context_window = 8192;
+            base.max_output_tokens = 4096;
+          }
+          modelDetails.push(base);
+        }
+
         const result = {
           available: true,
           models,
+          modelDetails,
+          loaded,
+          loadedCount: loaded.length,
+          memory: {
+            // Approximate: sum of loaded model sizes (bytes) when Ollama reports them
+            loaded_bytes: loaded.reduce((n, m) => n + (Number(m.size) || 0), 0),
+            loaded_vram_bytes: loaded.reduce((n, m) => n + (Number(m.size_vram) || 0), 0)
+          },
           baseUrl: lastGood || customBase || null,
           candidates: candidates(),
           code: models.length ? 'OK' : 'NO_LOCAL_MODELS',
-          status: models.length ? 'ready' : 'ready_no_models',
-          suggested: SUGGESTED_LOCAL_MODELS
+          status: models.length ? (loaded.length ? 'ready_loaded' : 'ready') : 'ready_no_models',
+          cold_start: loaded.length === 0 && models.length > 0,
+          suggested: SUGGESTED_LOCAL_MODELS,
+          psError: psError || null
         };
         posCache = { until: now + 60_000, data: result };
         return result;

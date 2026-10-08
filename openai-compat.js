@@ -65,6 +65,93 @@ function isBrowserSameOrigin(req) {
   }
 }
 
+
+/** Capability defaults for known providers — Builder-friendly metadata */
+const CLOUD_MODEL_META = {
+  // rough defaults; discovery overrides when possible
+  default: { context_window: 128000, max_output_tokens: 8192, supports_json: true, supports_tools: true, supports_vision: false, supports_reasoning: false, supports_streaming: true },
+  'gpt-4o': { context_window: 128000, max_output_tokens: 16384, supports_vision: true, supports_tools: true },
+  'gpt-4o-mini': { context_window: 128000, max_output_tokens: 16384, supports_vision: true },
+  'gemini-2.5-flash': { context_window: 1048576, max_output_tokens: 8192, supports_vision: true, supports_tools: true },
+  'gemini-2.0-flash': { context_window: 1048576, max_output_tokens: 8192, supports_vision: true },
+  'claude-3-5-haiku': { context_window: 200000, max_output_tokens: 8192, supports_tools: true },
+  'deepseek-chat': { context_window: 64000, max_output_tokens: 8192, supports_json: true },
+  'deepseek-reasoner': { context_window: 64000, max_output_tokens: 8192, supports_reasoning: true },
+};
+
+function metaForCloud(modelId, provider) {
+  const id = String(modelId || '');
+  const lower = id.toLowerCase();
+  let base = { ...CLOUD_MODEL_META.default };
+  for (const [k, v] of Object.entries(CLOUD_MODEL_META)) {
+    if (k !== 'default' && lower.includes(k)) base = { ...base, ...v };
+  }
+  if (/vision|gpt-4o|gemini|claude-3/i.test(lower)) base.supports_vision = true;
+  if (/reason|o1|o3|r1/i.test(lower)) base.supports_reasoning = true;
+  if (provider === 'anthropic') base.supports_tools = true;
+  return base;
+}
+
+function buildModelEntry({ id, owned_by, provider = null, localDetail = null, latency_ms = null, health = 'unknown' }) {
+  const isLocal = owned_by === 'local' || provider === 'local';
+  let meta;
+  if (isLocal && localDetail) {
+    meta = {
+      context_window: localDetail.context_window || 8192,
+      max_output_tokens: localDetail.max_output_tokens || 4096,
+      supports_json: true,
+      supports_tools: false,
+      supports_vision: /llava|vision|bakllava/i.test(id),
+      supports_reasoning: /reason|r1|qwq/i.test(id),
+      supports_streaming: true,
+      loaded: !!localDetail.loaded,
+      size_bytes: localDetail.size || null,
+      family: localDetail.family || null,
+      parameter_size: localDetail.parameter_size || null,
+      quantization: localDetail.quantization || null
+    };
+  } else if (isLocal) {
+    meta = {
+      context_window: 8192,
+      max_output_tokens: 4096,
+      supports_json: true,
+      supports_tools: false,
+      supports_vision: false,
+      supports_reasoning: false,
+      supports_streaming: true,
+      loaded: false
+    };
+  } else {
+    meta = metaForCloud(id, provider || owned_by);
+  }
+  return {
+    id,
+    object: 'model',
+    created: Math.floor(Date.now() / 1000),
+    owned_by: owned_by || 'personal-ai-hub',
+    permission: [],
+    root: id,
+    parent: null,
+    // Builder / international provider metadata
+    context_window: meta.context_window,
+    max_output_tokens: meta.max_output_tokens,
+    supports_json: !!meta.supports_json,
+    supports_tools: !!meta.supports_tools,
+    supports_vision: !!meta.supports_vision,
+    supports_reasoning: !!meta.supports_reasoning,
+    supports_streaming: meta.supports_streaming !== false,
+    latency_ms: latency_ms,
+    health: health,
+    loaded: meta.loaded != null ? !!meta.loaded : null,
+    provider: provider || owned_by || null,
+    // local extras
+    size_bytes: meta.size_bytes || null,
+    family: meta.family || null,
+    parameter_size: meta.parameter_size || null,
+    quantization: meta.quantization || null
+  };
+}
+
 export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub' }) {
   const clientFromReq = (req) => ({
     ip: String(req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '').split(',')[0].trim() || null,
@@ -164,45 +251,70 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
   const listModels = asyncRoute(async (_req, res) => {
     const seen = new Set();
     const data = [];
-    const push = (id, owned_by) => {
-      const key = String(id);
+    const push = (entry) => {
+      const key = String(entry.id || '');
       if (!key || seen.has(key)) return;
       seen.add(key);
-      data.push({
-        id: key,
-        object: 'model',
-        created: Math.floor(Date.now() / 1000),
-        owned_by: owned_by || 'personal-ai-hub',
-        permission: [],
-        root: key,
-        parent: null
-      });
+      data.push(entry);
     };
-    push('auto', 'personal-ai-hub');
+    push(buildModelEntry({
+      id: 'auto', owned_by: 'personal-ai-hub', provider: 'personal-ai-hub',
+      health: 'ready', latency_ms: null
+    }));
+    // auto is smart-routed
+    data[0].supports_tools = true;
+    data[0].supports_json = true;
+    data[0].supports_streaming = true;
+    data[0].context_window = 128000;
+    data[0].max_output_tokens = 8192;
+
+    let localMeta = { available: false, modelDetails: [], loaded: [], cold_start: null, memory: null, status: 'unavailable' };
     try {
-      const localInfo = await kernel.local.models();
-      if (localInfo?.available && Array.isArray(localInfo.models)) {
-        for (const m of localInfo.models) {
+      localMeta = await kernel.local.models() || localMeta;
+      if (localMeta?.available && Array.isArray(localMeta.models)) {
+        const detailMap = Object.fromEntries((localMeta.modelDetails || []).map(d => [d.name, d]));
+        for (const m of localMeta.models) {
           const name = typeof m === 'string' ? m : (m?.name || m?.model);
           if (!name) continue;
-          push(name, 'local');
-          push(`local/${name}`, 'local');
-          push(`ollama/${name}`, 'local');
+          const detail = detailMap[name] || null;
+          const health = detail?.loaded ? 'loaded' : (localMeta.cold_start ? 'cold' : 'ready');
+          const entry = (suffix, id) => buildModelEntry({
+            id, owned_by: 'local', provider: 'local', localDetail: detail, health,
+            latency_ms: detail?.loaded ? 50 : 2000
+          });
+          push(entry(null, name));
+          push(entry(null, `local/${name}`));
+          push(entry(null, `ollama/${name}`));
         }
       }
     } catch {}
+
     try {
       const keys = await kernel.keys.listKeys();
       for (const k of keys) {
         if (k.status === 'INVALID' || k.status === 'BILLING_REQUIRED') continue;
         if (k.provider === 'local') continue;
+        const health = k.status === 'ACTIVE' ? 'ready' : String(k.status || 'unknown').toLowerCase();
         for (const m of k.models || []) {
-          push(m, k.provider);
-          push(`${k.provider}/${m}`, k.provider);
+          push(buildModelEntry({ id: m, owned_by: k.provider, provider: k.provider, health }));
+          push(buildModelEntry({ id: `${k.provider}/${m}`, owned_by: k.provider, provider: k.provider, health }));
         }
       }
     } catch {}
-    res.json({ object: 'list', data });
+
+    res.json({
+      object: 'list',
+      data,
+      hub: {
+        local: {
+          available: !!localMeta.available,
+          status: localMeta.status || null,
+          cold_start: !!localMeta.cold_start,
+          loaded_count: localMeta.loadedCount || (localMeta.loaded || []).length,
+          memory: localMeta.memory || null
+        }
+      }
+    });
   });
 
   const chatCompletions = asyncRoute(async (req, res) => {
@@ -371,7 +483,17 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       status: 'ok',
       object: 'health',
       hub: 'healthy',
-      local: !!h.local,
+      local: {
+        available: !!h.local,
+        status: h.localStatus || null,
+        models: h.localModels || 0,
+        loaded: h.localLoaded || [],
+        loaded_count: h.localLoadedCount || 0,
+        cold_start: !!h.localColdStart,
+        memory: h.localMemory || null,
+        model_details: h.localModelDetails || []
+      },
+      localAvailable: !!h.local,
       localStatus: h.localStatus || null,
       localModels: h.localModels || 0,
       activeKeys: h.activeKeys,

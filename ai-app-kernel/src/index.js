@@ -750,6 +750,12 @@ export function createAiKernel(options = {}) {
           return {
             available: true,
             models: health.models || [],
+            modelDetails: health.modelDetails || [],
+            loaded: health.loaded || [],
+            loadedCount: health.loadedCount || 0,
+            memory: health.memory || null,
+            cold_start: !!health.cold_start,
+            status: health.status || 'ready',
             baseUrl: health.baseUrl || local.getBaseUrl(),
             candidates: health.candidates || local.candidateUrls?.() || [],
             configuredBaseUrl: state.config?.ollamaBaseUrl || null
@@ -1142,6 +1148,20 @@ export function createAiKernel(options = {}) {
         localModels: localInfo.models?.length || 0,
         localStatus: localInfo.status || (localInfo.available ? 'ready' : 'unavailable'),
         localCode: localInfo.code || null,
+        localLoaded: localInfo.loaded || [],
+        localLoadedCount: localInfo.loadedCount || 0,
+        localMemory: localInfo.memory || null,
+        localColdStart: !!localInfo.cold_start,
+        localModelDetails: (localInfo.modelDetails || []).map(d => ({
+          name: d.name,
+          context_window: d.context_window,
+          max_output_tokens: d.max_output_tokens,
+          loaded: !!d.loaded,
+          size: d.size,
+          family: d.family,
+          parameter_size: d.parameter_size,
+          quantization: d.quantization
+        })),
         routingMode: state.config?.routingMode || 'balanced',
         byProvider
       };
