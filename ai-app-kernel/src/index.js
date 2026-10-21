@@ -320,7 +320,7 @@ export function createAiKernel(options = {}) {
   const kernel = {
     schema, store, actions, providers,
 
-    async chat({ message, provider, model, system, appId, strictProvider = false, transparent = false, temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, messages = null, hasVision = false } = {}) {
+    async chat({ message, provider, model, system, appId, strictProvider = false, transparent = false, temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, messages = null, hasVision = false, allowFallback = true } = {}) {
       const requestId = crypto.randomUUID();
       if (!message?.trim()) throw Object.assign(new Error('MESSAGE_REQUIRED'), { statusCode: 400 });
 
@@ -404,7 +404,24 @@ export function createAiKernel(options = {}) {
         ].filter(Boolean).join('\n\n');
       }
 
-      const failures = [];
+      
+      // Explicit model: must be listed on a key when discovery exists (quality: no silent substitute)
+      if (model && model !== 'auto' && !String(model).startsWith('auto-')) {
+        const anyDisc = eligible.some(k => (k.models || []).length > 0);
+        const listed = eligible.some(k => (k.models || []).includes(model) || k.selectedModel === model);
+        if (anyDisc && !listed) {
+          await logger.write('chat.failed', 'warn', { requestId, reason: 'MODEL_NOT_FOUND', model });
+          return {
+            reply: '',
+            error: 'MODEL_NOT_FOUND',
+            code: 'model_not_found',
+            message: `Model '${model}' is not available on any configured key`,
+            requestId
+          };
+        }
+      }
+
+const failures = [];
       for (const k of eligible) {
         const p = providers[k.provider];
         if (!p) continue;
@@ -439,8 +456,12 @@ export function createAiKernel(options = {}) {
             if (vis.length) candidates = [...vis, ...rest];
           }
         } else {
-          // Explicit client model: keep it first, never let sticky override (fixes R1)
-          candidates = [model, ...candidates.filter(m => m !== model)];
+          // Explicit client model: keep it first, never let sticky override
+          if (allowFallback === false) {
+            candidates = [model];
+          } else {
+            candidates = [model, ...candidates.filter(m => m !== model)];
+          }
         }
 
         if (!candidates.length) {
@@ -667,9 +688,10 @@ export function createAiKernel(options = {}) {
      * or {type:'error', error, statusCode, message}.
      * Transparent mode skips knowledge/memory injection (same as chat).
      */
-    async *chatStream({ message, provider, model, system, appId, transparent = false, temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, signal } = {}) {
+    async *chatStream({ message, messages, provider, model, system, appId, transparent = false, temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, signal, hasVision = false, allowFallback = true } = {}) {
       const requestId = crypto.randomUUID();
-      if (!message?.trim()) {
+      const hasMsgArr = Array.isArray(messages) && messages.length > 0;
+      if (!message?.trim() && !hasMsgArr) {
         yield { type: 'error', error: 'MESSAGE_REQUIRED', statusCode: 400, message: 'messages required', requestId };
         return;
       }
@@ -687,6 +709,23 @@ export function createAiKernel(options = {}) {
           requestId
         };
         return;
+      }
+
+      // Explicit model must exist on at least one discovered list (when discovery available)
+      if (model && model !== 'auto' && !String(model).startsWith('auto-')) {
+        const anyDisc = eligible.some(k => (k.models || []).length > 0);
+        const listed = eligible.some(k => (k.models || []).includes(model) || k.selectedModel === model);
+        if (anyDisc && !listed) {
+          yield {
+            type: 'error',
+            error: 'MODEL_NOT_FOUND',
+            code: 'model_not_found',
+            statusCode: 404,
+            message: `Model '${model}' is not available on any configured key`,
+            requestId
+          };
+          return;
+        }
       }
 
       let contextSystem;
@@ -708,9 +747,23 @@ export function createAiKernel(options = {}) {
         ].filter(Boolean).join('\n\n');
       }
 
-      const msgs = contextSystem
-        ? [{ role: 'system', content: contextSystem }, { role: 'user', content: message }]
-        : [{ role: 'user', content: message }];
+      // Prefer full OpenAI-style messages (preserves history, tools, images)
+      let msgs;
+      if (hasMsgArr) {
+        msgs = messages.map(m => ({ ...m }));
+        if (contextSystem) {
+          const hasSys = msgs.some(m => m.role === 'system');
+          if (!hasSys) msgs = [{ role: 'system', content: contextSystem }, ...msgs];
+          else if (!transparent) {
+            // Prepend Hub knowledge only for non-transparent without clobbering client system
+            msgs = [{ role: 'system', content: contextSystem }, ...msgs];
+          }
+        }
+      } else {
+        msgs = contextSystem
+          ? [{ role: 'system', content: contextSystem }, { role: 'user', content: message }]
+          : [{ role: 'user', content: message }];
+      }
       const chatOpts = { temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, signal };
 
       for (const k of eligible) {
@@ -802,11 +855,19 @@ export function createAiKernel(options = {}) {
           const result = await embedProvider(p, token, chosen, values, fetchImpl);
           return { ...result, model: result.model || chosen, provider: k.provider, keyId: k.id, requestId };
         } catch (err) {
-          if (err.status === 401 || err.status === 403) k.status = 'INVALID';
-          else if (err.status === 429) { k.status = 'COOLDOWN'; k.retryAt = Date.now() + 60000; }
-          else k.status = 'ERROR';
-          k.lastError = safeError(err);
-          await saveState();
+          // Embeddings must NOT poison chat key status (E1)
+          const msg = safeError(err);
+          await logger.write('embed.failed', 'warn', {
+            requestId, provider: k.provider, model: chosen, keyId: k.id,
+            error: msg, status: err.status || null
+          });
+          if (err.status === 401 || err.status === 403) {
+            // Auth failure is key-wide — still mark
+            k.status = 'INVALID';
+            k.lastError = msg;
+            await saveState();
+          }
+          // 429/5xx on embeddings: try next key, do not set ERROR/COOLDOWN on chat key
         }
       }
       throw Object.assign(new Error('ALL_PROVIDERS_FAILED'), { statusCode: 503 });

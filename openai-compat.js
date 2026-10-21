@@ -463,7 +463,8 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       temperature: body.temperature, max_tokens: body.max_tokens ?? body.max_completion_tokens,
       top_p: body.top_p, stop: body.stop, seed: body.seed,
       response_format: body.response_format, tools: body.tools, tool_choice: body.tool_choice,
-      hasVision: multimodal
+      hasVision: multimodal,
+      allowFallback: req.gatewayScope?.allowFallback !== false
     };
 
     // --- True SSE streaming path (headers only after first successful event) ---
@@ -608,6 +609,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       let status = 502;
       const code = String(result.error || 'AI_PROVIDER_ERROR');
       if (/NO_ACTIVE_KEY|NO_PROVIDER|ALL_PROVIDERS|no_provider/i.test(code)) status = 503;
+      if (/MODEL_NOT_FOUND|model_not_found/i.test(code)) status = 404;
       if (/RATE_LIMIT|USAGE_QUOTA|QUOTA/i.test(code) || /429/.test(String(result.message || ''))) status = 429;
       if (/AUTH|INVALID_GATEWAY|FORBIDDEN/i.test(code)) status = 401;
       return res.status(status).json({
@@ -655,6 +657,10 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     res.setHeader('X-Request-Id', requestId);
     if (result.provider) res.setHeader('X-Hub-Provider', String(result.provider));
     if (result.model) res.setHeader('X-Hub-Model', String(result.model));
+    if (body.model && result.model && String(body.model) !== 'auto' && !String(body.model).startsWith('auto-')
+        && String(result.model) !== String(body.model) && String(result.model) !== String(parsed.model || '')) {
+      res.setHeader('X-Hub-Fallback-From', String(body.model));
+    }
     return res.json(payload);
   });
 
@@ -673,20 +679,25 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
         return { role: 'user', content: '' };
       });
     }
-    const { message: input, system: inputSystem } = messagesToPrompt(messages);
     const instructions = typeof body.instructions === 'string' ? body.instructions.trim() : '';
-    const combinedSystem = [instructions, inputSystem].filter(Boolean).join('\n\n');
-    if (!input.trim()) return res.status(400).json({ error:{message:'input required',type:'invalid_request_error',code:'INPUT_REQUIRED'} });
+    const upstream = normalizeMessagesForUpstream(messages);
+    if (instructions) upstream.unshift({ role: 'system', content: instructions });
+    const lastUser = [...upstream].reverse().find(m => m.role === 'user');
+    const input = lastUser ? extractText(lastUser.content).trim() : '';
+    if (!input && !upstream.length) return res.status(400).json({ error:{message:'input required',type:'invalid_request_error',code:'INPUT_REQUIRED'} });
     const parsed = parseModel(body.model);
     const requestId = req.headers['x-request-id'] || `resp-${randomUUID().replace(/-/g,'').slice(0,24)}`;
     const appId = req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || null;
     const result = await kernel.chat({
-      message: input, system: combinedSystem || undefined,
+      message: input || '[input]',
+      messages: upstream,
+      system: instructions || undefined,
       provider: parsed.provider || undefined, model: parsed.model || undefined,
       appId, requestId, transparent: true,
       temperature: body.temperature, max_tokens: body.max_tokens ?? body.max_completion_tokens,
       top_p: body.top_p, stop: body.stop, seed: body.seed,
-      response_format: body.response_format, tools: body.tools, tool_choice: body.tool_choice
+      response_format: body.response_format, tools: body.tools, tool_choice: body.tool_choice,
+      allowFallback: req.gatewayScope?.allowFallback !== false
     });
     const usage = result.usage || {prompt_tokens:0,completion_tokens:0,total_tokens:0};
     await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage,error:!!result.error,client:clientFromReq(req)});
