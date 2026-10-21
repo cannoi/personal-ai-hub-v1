@@ -201,8 +201,9 @@ function buildModelEntry({ id, owned_by, provider = null, localDetail = null, la
 
 export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub' }) {
   const clientFromReq = (req) => ({
-    ip: String(req.headers['x-forwarded-for'] || req.ip || req.socket?.remoteAddress || '').split(',')[0].trim() || null,
-    ua: String(req.headers['user-agent'] || '').slice(0, 120) || null
+    // Prefer Express req.ip when trust proxy is enabled; never trust raw XFF alone
+    ip: (req.ip || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || null),
+    ua: String(req.headers['user-agent'] || '').slice(0, 180) || null
   });
 
   if (!app || typeof app.get !== 'function') {
@@ -300,6 +301,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
           return norm === e || norm.endsWith(e) || norm.includes(e);
         });
         if (!okEp) {
+          try { lease.slot?.release?.(); } catch {}
           return res.status(403).json({
             error: {
               message: `This token is not allowed to call ${norm}`,
@@ -430,23 +432,32 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     const parsed = parseModel(body.model);
     const modelDenied = assertModelAllowed(req, body.model);
     if (modelDenied) return res.status(modelDenied.status).json({ error: modelDenied.error });
-    const { message, system } = messagesToPrompt(body.messages);
-    if (!message) return res.status(400).json({ error: { message: 'messages required', type: 'invalid_request_error', code: 'MESSAGES_REQUIRED' } });
+    if (!Array.isArray(body.messages) || !body.messages.length) {
+      return res.status(400).json({ error: { message: 'messages required', type: 'invalid_request_error', code: 'MESSAGES_REQUIRED' } });
+    }
+    // NEVER collapse history into "Conversation so far" — pass full roles through
+    const upstreamMessages = normalizeMessagesForUpstream(body.messages);
+    const multimodal = hasMultimodal(body.messages);
+    const lastUser = [...body.messages].reverse().find(m => m?.role === 'user');
+    const message = lastUser ? extractText(lastUser.content).trim() : extractText(body.messages[body.messages.length - 1]?.content).trim();
+    if (!message && !multimodal && !body.messages.some(m => m?.tool_calls || m?.role === 'tool')) {
+      return res.status(400).json({ error: { message: 'messages required', type: 'invalid_request_error', code: 'MESSAGES_REQUIRED' } });
+    }
     const requestId = req.headers['x-request-id'] || `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
     const appId = req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || body.user || null;
     const started = Date.now();
     const id = requestId.startsWith('chatcmpl-') ? requestId : `chatcmpl-${requestId}`;
-    const multimodal = hasMultimodal(body.messages);
-    const upstreamMessages = multimodal ? normalizeMessagesForUpstream(body.messages) : null;
-    // Prefer vision-capable model when images present and client asked auto
     let routeModel = parsed.model || undefined;
     let routeProvider = parsed.provider || undefined;
     if (multimodal && (!body.model || body.model === 'auto' || body.model === 'default')) {
       routeModel = 'auto-vision';
     }
+    // Extract system messages for legacy path; full array is authoritative
+    const systemParts = upstreamMessages.filter(m => m.role === 'system').map(m => extractText(m.content)).filter(Boolean);
     const chatArgs = {
-      message, system: system || undefined,
-      messages: upstreamMessages, // full multimodal messages when present
+      message: message || '[multimodal]',
+      system: systemParts.join('\n\n') || undefined,
+      messages: upstreamMessages,
       provider: routeProvider, model: routeModel,
       appId, transparent: true,
       temperature: body.temperature, max_tokens: body.max_tokens ?? body.max_completion_tokens,
@@ -455,15 +466,8 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       hasVision: multimodal
     };
 
-    // --- True SSE streaming path ---
+    // --- True SSE streaming path (headers only after first successful event) ---
     if (body.stream === true) {
-      res.status(200);
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.setHeader('X-Request-Id', requestId);
-      res.flushHeaders?.();
-
       const ac = new AbortController();
       const onClose = () => { try { ac.abort(); } catch {} };
       req.on('close', onClose);
@@ -475,25 +479,72 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       let keyId = null;
       let hadError = false;
       let firstDelta = true;
+      let headersSent = false;
       const created = Math.floor(Date.now() / 1000);
-      // keep-alive every 15s
-      const keepAlive = setInterval(() => {
-        try { res.write(': keep-alive\n\n'); } catch {}
-      }, 15000);
+      let keepAlive = null;
+
+      const openSse = () => {
+        if (headersSent || res.headersSent) return;
+        headersSent = true;
+        res.status(200);
+        res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-cache, no-transform');
+        res.setHeader('Connection', 'keep-alive');
+        res.setHeader('X-Request-Id', requestId);
+        res.flushHeaders?.();
+        keepAlive = setInterval(() => {
+          try { res.write(': keep-alive\n\n'); } catch {}
+        }, 15000);
+      };
+
+      const jsonError = (status, code, message) => {
+        if (headersSent || res.headersSent) return false;
+        hadError = true;
+        res.status(status).json({
+          error: {
+            message: String(message || code).slice(0, 700),
+            type: status === 401 ? 'authentication_error' : (status === 404 ? 'invalid_request_error' : 'api_error'),
+            code: String(code).slice(0, 64),
+            request_id: requestId
+          }
+        });
+        return true;
+      };
 
       try {
         for await (const ev of kernel.chatStream({ ...chatArgs, signal: ac.signal })) {
+          if (ev.type === 'error') {
+            hadError = true;
+            let status = Number(ev.statusCode) || 502;
+            const code = String(ev.error || 'STREAM_ERROR');
+            if (/NO_ACTIVE_KEY|NO_PROVIDER|ALL_PROVIDERS|no_provider/i.test(code)) status = 503;
+            if (/RATE_LIMIT|QUOTA|429/i.test(code)) status = 429;
+            if (/AUTH|INVALID/i.test(code)) status = 401;
+            if (/model_not_found|MODEL_NOT/i.test(code)) status = 404;
+            if (jsonError(status, code, ev.message || ev.error)) break;
+            openSse();
+            res.write(`data: ${JSON.stringify({
+              id, object: 'chat.completion.chunk', created, model: servedModel,
+              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              error: { message: ev.message || ev.error, type: 'api_error', code }
+            })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            break;
+          }
           if (ev.type === 'meta') {
             provider = ev.provider;
             keyId = ev.keyId;
             servedModel = ev.model || servedModel;
+            openSse();
             continue;
           }
-          if (ev.type === 'delta' && ev.content) {
+          if (ev.type === 'delta' && (ev.content || ev.tool_calls)) {
+            openSse();
             if (ev.model) servedModel = ev.model;
             const delta = firstDelta
-              ? { role: 'assistant', content: ev.content }
-              : { content: ev.content };
+              ? { role: 'assistant', content: ev.content || null }
+              : { content: ev.content || null };
+            if (ev.tool_calls) delta.tool_calls = ev.tool_calls;
             firstDelta = false;
             res.write(`data: ${JSON.stringify({
               id, object: 'chat.completion.chunk', created, model: servedModel,
@@ -502,6 +553,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
             continue;
           }
           if (ev.type === 'done') {
+            openSse();
             if (ev.model) servedModel = ev.model;
             if (ev.usage) usage = ev.usage;
             res.write(`data: ${JSON.stringify({
@@ -517,36 +569,31 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
             res.write('data: [DONE]\n\n');
             break;
           }
-          if (ev.type === 'error') {
-            hadError = true;
-            // If headers already sent, emit error as SSE comment then end
-            const status = ev.statusCode || 502;
-            res.write(`data: ${JSON.stringify({
-              id, object: 'chat.completion.chunk', created, model: servedModel,
-              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
-              error: { message: ev.message || ev.error, type: 'api_error', code: ev.error || 'STREAM_ERROR' }
-            })}\n\n`);
-            res.write('data: [DONE]\n\n');
-            break;
-          }
         }
       } catch (err) {
         hadError = true;
-        try {
-          res.write(`data: ${JSON.stringify({
-            error: { message: String(err?.message || err).slice(0, 400), type: 'api_error', code: 'STREAM_FAILED' }
-          })}\n\n`);
-          res.write('data: [DONE]\n\n');
-        } catch {}
+        if (!jsonError(502, 'STREAM_FAILED', err?.message || err)) {
+          try {
+            openSse();
+            res.write(`data: ${JSON.stringify({
+              error: { message: String(err?.message || err).slice(0, 400), type: 'api_error', code: 'STREAM_FAILED' }
+            })}\n\n`);
+            res.write('data: [DONE]\n\n');
+          } catch {}
+        }
       } finally {
-        clearInterval(keepAlive);
+        if (keepAlive) clearInterval(keepAlive);
         req.off?.('close', onClose);
         req.off?.('aborted', onClose);
-        await kernel.gateway.recordUsage({
-          tokenId: req.gatewayTokenId, appId, usage, error: hadError, client: clientFromReq(req)
-        });
+        try {
+          await kernel.gateway.recordUsage({
+            tokenId: req.gatewayTokenId, appId, usage, error: hadError, client: clientFromReq(req)
+          });
+        } catch {}
         if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
-        try { res.end(); } catch {}
+        if (headersSent) {
+          try { res.end(); } catch {}
+        }
       }
       return;
     }
@@ -580,7 +627,8 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     }
 
     const content = String(result.reply || '').trim();
-    if (!content) {
+    const toolCalls = result.tool_calls || null;
+    if (!content && !(Array.isArray(toolCalls) && toolCalls.length)) {
       return res.status(502).json({
         error: {
           message: 'Upstream returned an empty assistant message. Check Settings → Activity Log and Test provider keys.',
@@ -591,10 +639,13 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       });
     }
 
+    const assistantMessage = { role: 'assistant', content: content || null };
+    if (toolCalls?.length) assistantMessage.tool_calls = toolCalls;
+    const finish = result.finishReason || (toolCalls?.length ? 'tool_calls' : 'stop');
     const payload = {
       id, object: 'chat.completion', created: Math.floor(Date.now() / 1000),
       model: result.model || body.model || 'auto',
-      choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: result.finishReason || 'stop', logprobs: null }],
+      choices: [{ index: 0, message: assistantMessage, finish_reason: finish, logprobs: null }],
       usage,
       personal_ai_hub: {
         provider: result.provider || null, keyId: result.keyId || null,

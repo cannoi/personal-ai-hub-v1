@@ -496,7 +496,8 @@ export function createAiKernel(options = {}) {
                 chatOpts
               );
               const reply = String(result.reply || '').trim();
-              if (!reply) {
+              const hasTools = Array.isArray(result.tool_calls) && result.tool_calls.length > 0;
+              if (!reply && !hasTools) {
                 const e = new Error('PROVIDER_EMPTY_RESPONSE');
                 e.status = 502;
                 throw e;
@@ -606,7 +607,7 @@ export function createAiKernel(options = {}) {
             requestId, provider: k.provider, model: result.model, keyId: k.id,
             appId: appId || 'hub-ui', responseLength: reply.length
           });
-          return { ...result, reply, provider: k.provider, keyId: k.id, requestId, usage: result.usage || null };
+          return { ...result, reply, tool_calls: result.tool_calls || null, finishReason: result.finishReason || (result.tool_calls?.length ? 'tool_calls' : 'stop'), provider: k.provider, keyId: k.id, requestId, usage: result.usage || null };
         } catch (err) {
           const messageSafe = safeError(err);
           const cls = classifyProviderError(err);

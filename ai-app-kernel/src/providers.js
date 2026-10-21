@@ -75,26 +75,12 @@ export function rankChatModels(list, preferred = null) {
 
   const score = (id) => {
     const n = String(id).toLowerCase();
-    let s = 50; // baseline
-
-    // Quality-first ranking (v2 default = quality). Economy mode can invert later.
-    // Flagship / pro / opus / large models score highest.
-    if (/\bopus\b|gpt-4o(?!-mini)|gpt-4\.1(?!-mini)|o3(?!-mini)|o1(?!-mini)|claude-3-5-sonnet|claude-4|gemini-2\.5-pro|gemini-3.*pro|deepseek.*pro|70b|405b|\bpro\b/.test(n)) s += 80;
-    if (/\bsonnet\b|gpt-4o-mini|gpt-4\.1-mini|o3-mini|o1-mini|gemini-2\.5-flash(?!-lite)|deepseek-chat|deepseek-v3/.test(n)) s += 55;
-    if (/\bhaiku\b|flash-lite|nano|\btiny\b|\bsmall\b|instant|8b|7b|3b|1b|gpt-3\.5/.test(n)) s += 15;
-    if (/flash(?!-lite)/.test(n)) s += 40;
-    if (/:free\b|\/free/.test(n)) s += 10; // free is fine but not first in quality mode
-    if (/\breason|\br1\b|\bo3\b|\bo1\b/.test(n)) s += 25;
-    if (/\bchat\b|\binstruct\b/.test(n)) s += 8;
-    if (/gemma|llama|mistral|qwen|phi/.test(n)) s += 5;
-
-    // --- Expensive / quota-heavy last ---
-    if (/\bpro\b|pro-latest|-pro-/.test(n)) s -= 40;
-    if (/\bultra\b|\bmax\b|\bo1\b|\bo3\b|reasoner/.test(n) && !/deepseek-chat/.test(n)) s -= 12;
-    if (/preview|exp|experimental/.test(n)) s -= 5;
-    if (/120b|405b|opus/.test(n)) s -= 8;
-
-    return s;
+    // Absolute tier scores (catalog-aligned): flagship 100 > standard 70 > fast 45 > tiny 20
+    if (/gpt-5(?!-mini|-nano)|\bopus\b|gpt-4o(?!-mini)|gpt-4\.1(?!-mini)|o3(?!-mini)|o1(?!-mini)|claude.*sonnet|claude.*opus|gemini[\w.-]*pro|deepseek.*reason|70b|405b/.test(n)) return 100;
+    if (/gpt-5-mini|gpt-4o-mini|gpt-4\.1-mini|o3-mini|o1-mini|deepseek|\bsonnet\b|mistral-large|grok-3(?!-mini)/.test(n)) return 70;
+    if (/flash(?!-lite)|\bhaiku\b|\bmini\b|grok-3-mini|mistral-small|instant/.test(n)) return 45;
+    if (/flash-lite|nano|\btiny\b|8b|7b|3b|1b|gpt-3\.5/.test(n)) return 20;
+    return 70; // unknown → standard, never below tiny
   };
 
   uniq.sort((a, b) => score(b) - score(a) || a.localeCompare(b));
@@ -114,7 +100,9 @@ export async function listModels(provider, token, fetchImpl = fetch) {
     return (j.models || []).map(m => m.name).filter(Boolean);
   }
   if (provider.type === 'gemini') {
-    const r = await fetchImpl(`${provider.baseUrl}/models?key=${encodeURIComponent(token)}`);
+    const r = await fetchImpl(`${provider.baseUrl}/models`, {
+      headers: { 'x-goog-api-key': token }
+    });
     if (!r.ok) throw await providerError(r);
     const j = await r.json();
     return rankChatModels(
@@ -402,11 +390,15 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
   });
   if (!r.ok) throw await providerError(r);
   const j = await r.json();
+  const choice = j.choices?.[0];
+  const toolCalls = choice?.message?.tool_calls || null;
+  const replyText = extractOpenAICompatibleReply(j);
   return {
-    reply: extractOpenAICompatibleReply(j),
+    reply: replyText,
+    tool_calls: toolCalls,
     model: j.model || model,
     usage: { prompt_tokens: Number(j.usage?.prompt_tokens || 0), completion_tokens: Number(j.usage?.completion_tokens || 0), total_tokens: Number(j.usage?.total_tokens || 0) },
-    finishReason: j.choices?.[0]?.finish_reason || null
+    finishReason: choice?.finish_reason || (toolCalls?.length ? 'tool_calls' : null)
   };
 }
 
@@ -436,10 +428,21 @@ export async function* streamChatProvider(provider, token, model, messages, fetc
     if (opts.stream_options) oaiBody.stream_options = opts.stream_options;
     else oaiBody.stream_options = { include_usage: true };
 
-    const controller = opts.signal ? null : new AbortController();
-    const signal = opts.signal || controller.signal;
     const timeoutMs = Number(opts.timeoutMs || adaptiveTimeoutMs(provider, opts) || 300000);
-    const timer = setTimeout(() => { try { (opts.signal || controller)?.abort?.(); } catch {} }, timeoutMs);
+    const timeoutSignal = typeof AbortSignal !== 'undefined' && AbortSignal.timeout
+      ? AbortSignal.timeout(timeoutMs)
+      : null;
+    const controller = new AbortController();
+    const onTimeout = () => { try { controller.abort(); } catch {} };
+    const timer = timeoutSignal ? null : setTimeout(onTimeout, timeoutMs);
+    if (timeoutSignal) {
+      timeoutSignal.addEventListener('abort', onTimeout, { once: true });
+    }
+    if (opts.signal) {
+      if (opts.signal.aborted) controller.abort();
+      else opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
+    }
+    const signal = controller.signal;
 
     let r;
     try {

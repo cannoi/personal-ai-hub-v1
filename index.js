@@ -60,7 +60,12 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '2mb' }));
+// Admin/control plane: 1mb; /v1 paths get a larger limit below
+app.use((req, res, next) => {
+  const isV1 = String(req.path || '').startsWith('/v1') || String(req.path || '').startsWith('/openai/v1');
+  const limit = isV1 ? '25mb' : '1mb';
+  return express.json({ limit })(req, res, next);
+});
 
 // Universal Feedback Hub module — server-only credentials; never exposed to the browser.
 const require = createRequire(import.meta.url);
@@ -69,7 +74,7 @@ const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-m
 const feedbackService = createFeedbackService({
   appId: 'personal-ai-hub',
   appName: 'Personal AI Hub',
-  version: '2.0.0'
+  version: '2.1.0'
 });
 mountFeedbackRoutes(app, feedbackService);
 
@@ -271,7 +276,7 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '2.0.0',
+    version: '2.1.0',
     openaiCompatible: true,
     routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });
@@ -430,7 +435,7 @@ app.get('/api/v1/gateway', (req, res) => {
   res.json({
     service: SERVICE_NAME,
     role: 'solohost-ai-gateway',
-    version: process.env.npm_package_version || '1.8.9',
+    version: process.env.npm_package_version || '2.1.0',
     openaiCompatible: true,
     defaultModel: 'auto',
     /** Primary URL that worked for THIS request — copy into App Builder first */

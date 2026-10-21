@@ -1,3 +1,4 @@
+import { assertSafeUrl } from './security.js';
 function defaultCandidates(provider, extraBase) {
   const explicit = process.env.OLLAMA_BASE_URL;
   // OLLAMA_HOST is host:port for the server bind — not always a URL
@@ -78,7 +79,13 @@ export function createLocalModelManager(provider, fetchImpl = fetch) {
 
   return {
     setBaseUrl(url) {
-      customBase = url ? String(url).replace(/\/$/, '') : null;
+      if (url) {
+        const cleaned = String(url).replace(/\/$/, '');
+        assertSafeUrl(cleaned); // SSRF guard for Ollama base URL
+        customBase = cleaned;
+      } else {
+        customBase = null;
+      }
       lastGood = customBase;
       negCache = { until: 0, error: null, candidates: [] };
       posCache = { until: 0, data: null };

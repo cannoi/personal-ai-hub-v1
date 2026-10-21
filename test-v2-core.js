@@ -106,8 +106,8 @@ function ok(name) { passed++; console.log('PASS', name); }
 // --- package version ---
 {
   const pkg = JSON.parse(await fs.readFile(new URL('./package.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.version, '2.0.0');
-  ok('package version 2.0.0');
+  assert.equal(pkg.version, '2.1.0');
+  ok('package version 2.1.0');
 }
 
 // --- no master key in tree ---

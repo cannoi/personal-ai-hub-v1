@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "tiers": {
+    "flagship": { "score": 100, "description": "Highest quality" },
+    "standard": { "score": 70, "description": "Balanced quality/cost" },
+    "fast": { "score": 45, "description": "Low latency / cheaper" },
+    "tiny": { "score": 20, "description": "Smallest / free tier" }
+  },
+  "rules": [
+    { "match": "gpt-5(?!-mini|-nano)", "tier": "flagship", "context_window": 200000, "max_output": 16384, "vision": true, "tools": true, "reasoning": true },
+    { "match": "gpt-5-mini", "tier": "standard", "context_window": 128000, "max_output": 8192, "vision": true, "tools": true },
+    { "match": "gpt-4o(?!-mini)", "tier": "flagship", "context_window": 128000, "max_output": 16384, "vision": true, "tools": true },
+    { "match": "gpt-4o-mini|gpt-4\\.1-mini", "tier": "fast", "context_window": 128000, "max_output": 8192, "vision": true, "tools": true },
+    { "match": "o3(?!-mini)|o1(?!-mini)", "tier": "flagship", "context_window": 200000, "max_output": 100000, "tools": true, "reasoning": true },
+    { "match": "o3-mini|o1-mini", "tier": "standard", "context_window": 128000, "tools": true, "reasoning": true },
+    { "match": "claude.*opus", "tier": "flagship", "context_window": 200000, "tools": true, "vision": true },
+    { "match": "claude.*sonnet", "tier": "flagship", "context_window": 200000, "tools": true, "vision": true },
+    { "match": "claude.*haiku", "tier": "fast", "context_window": 200000, "tools": true },
+    { "match": "gemini.*pro", "tier": "flagship", "context_window": 1000000, "vision": true, "tools": true },
+    { "match": "gemini.*flash-lite", "tier": "tiny", "context_window": 1000000, "vision": true },
+    { "match": "gemini.*flash", "tier": "fast", "context_window": 1000000, "vision": true, "tools": true },
+    { "match": "deepseek.*reasoner|deepseek-r1", "tier": "flagship", "tools": true, "reasoning": true },
+    { "match": "deepseek", "tier": "standard", "tools": true },
+    { "match": "70b|405b", "tier": "flagship" },
+    { "match": "8b|7b|3b|1b|tiny|nano|instant", "tier": "tiny" },
+    { "match": "embed|whisper|tts|dall-e|imagen", "tier": "tiny", "embeddings": true }
+  ],
+  "defaultTier": "standard"
+}
