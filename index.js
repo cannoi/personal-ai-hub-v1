@@ -629,12 +629,12 @@ if (String(process.env.ENABLE_MANAGED_OLLAMA || '0') === '1') {
   console.log('[hub] Managed Ollama off (ENABLE_MANAGED_OLLAMA!=1). Set OLLAMA_BASE_URL for external Local AI.');
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Personal AI Hub listening on 0.0.0.0:${PORT}`);
-  console.log('OpenAI routes: GET /v1/models, POST /v1/chat/completions, POST /v1/responses, POST /v1/embeddings, GET /v1/health, GET /v1/__ping');
-  console.log(`Service DNS name: ${SERVICE_NAME}`);
-  console.log(`Gateway discovery: http://${SERVICE_NAME}:${PORT}/api/v1/gateway`);
-  if (PUBLIC_BASE_URL) console.log(`Public base URL: ${PUBLIC_BASE_URL}`);
-  console.log(`Data dir: ${DATA_DIR}`);
-  console.log('Other SoloHost apps must call the Hub via service name or host port — never 127.0.0.1 from another container.');
+const server = app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[hub] listening on 0.0.0.0:${PORT}`);
+  console.log(`[hub] health: GET /health`);
+  console.log(`[hub] service=${SERVICE_NAME} data=${DATA_DIR}`);
+});
+server.on('error', (err) => {
+  console.error('[hub] listen failed:', err);
+  process.exit(1);
 });
