@@ -2,9 +2,9 @@ import crypto from 'node:crypto';
 import { mountKernel } from './http.js';
 import { createSecretVault } from './vault.js';
 import { createActivityLogger } from './logger.js';
-import { providerCatalog, listModels, chatProvider, embedProvider, isChatCapableModel, rankChatModels, classifyProviderError, adaptiveTimeoutMs, adaptiveNumPredict } from './providers.js';
+import { providerCatalog, listModels, chatProvider, streamChatProvider, embedProvider, isChatCapableModel, rankChatModels, classifyProviderError, adaptiveTimeoutMs, adaptiveNumPredict } from './providers.js';
 import { createLocalModelManager } from './local.js';
-import { createRateLimiter } from './security.js';
+import { createRateLimiter, assertSafeProviderUrl, isPrivateOrBlockedUrl } from './security.js';
 
 export function createAiKernel(options = {}) {
   const knowledge = options.knowledge || null;
@@ -97,10 +97,12 @@ export function createAiKernel(options = {}) {
   }
 
   async function saveState() {
-    const { mkdir, writeFile } = await import('node:fs/promises');
-    const { dirname } = await import('node:path');
+    const { mkdir, writeFile, rename } = await import('node:fs/promises');
+    const { dirname, join } = await import('node:path');
     await mkdir(dirname(stateFile), { recursive: true });
-    await writeFile(stateFile, JSON.stringify(state, null, 2), { mode: 0o600 });
+    const tmp = stateFile + '.tmp.' + process.pid;
+    await writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
+    await rename(tmp, stateFile);
   }
 
   const publicKey = k => ({
@@ -210,7 +212,7 @@ export function createAiKernel(options = {}) {
     return rankChatModels(base, preferred);
   }
 
-  function normalizeAssistantReply(text) {
+  function normalizeAssistantReply(text, { transparent = false } = {}) {
     let s = String(text || '').trim();
     if (!s) return s;
     // Strip accidental internal router JSON if model echoed it
@@ -220,8 +222,10 @@ export function createAiKernel(options = {}) {
         if (j && typeof j.reply === 'string' && j.reply.trim()) return j.reply.trim();
       } catch {}
     }
-    // Never surface App Builder branding from Hub assistant
-    s = s.replace(/\bApp Builder\b/gi, 'this SoloHost app');
+    // Only rewrite branding for Hub UI assistant; never alter client-facing /v1 replies
+    if (!transparent) {
+      s = s.replace(/\bApp Builder\b/gi, 'this SoloHost app');
+    }
     return s;
   }
 
@@ -303,13 +307,18 @@ export function createAiKernel(options = {}) {
   const kernel = {
     schema, store, actions, providers,
 
-    async chat({ message, provider, model, system, appId, strictProvider = false }) {
+    async chat({ message, provider, model, system, appId, strictProvider = false, transparent = false, temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, messages = null, hasVision = false } = {}) {
       const requestId = crypto.randomUUID();
       if (!message?.trim()) throw Object.assign(new Error('MESSAGE_REQUIRED'), { statusCode: 400 });
 
       const requestStartedAt = Date.now();
+      // auto-vision is an alias: clear concrete model id, keep hasVision preference
+      if (model === 'auto-vision' || model === 'auto-best') {
+        hasVision = hasVision || model === 'auto-vision';
+        model = null;
+      }
       await logger.write('chat.request', 'info', {
-        requestId, provider, model, appId: appId || 'hub-ui', messageLength: String(message).length
+        requestId, provider, model, appId: appId || 'hub-ui', messageLength: String(message).length, transparent: !!transparent, hasVision: !!hasVision
       });
 
       let eligible = await chooseKeys(provider, model, !provider && !strictProvider);
@@ -324,6 +333,18 @@ export function createAiKernel(options = {}) {
           available: state.keys.filter(k => !provider || k.provider === provider)
             .map(k => ({ provider: k.provider, status: k.status, keyId: k.id, lastError: k.lastError }))
         });
+        // Transparent gateway mode: never return Hub guide text as if it were AI output
+        if (transparent) {
+          return {
+            reply: '',
+            error: 'NO_ACTIVE_KEY',
+            code: 'no_provider_configured',
+            message: 'No usable AI provider key is configured. Add a key in Hub Settings or enable Ollama.',
+            needsUserAction: true,
+            requestId,
+            statusCode: 503
+          };
+        }
         if (typeof localReply === 'function') {
           try {
             const guide = await localReply(message, { appId: appId || 'hub-ui', reason: 'NO_ACTIVE_KEY' });
@@ -349,20 +370,26 @@ export function createAiKernel(options = {}) {
       }
 
       await loadState();
-      const memApp = appId || 'hub-ui';
-      const memories = (state.memory || [])
-        .filter(x => (x.appId || 'hub-ui') === memApp)
-        .slice(-8)
-        .map(x => `${x.role}: ${x.content}`)
-        .join('\n');
-      const appKnowledge = (typeof knowledge === 'string' && knowledge.trim())
-        ? knowledge.trim()
-        : '';
-      const contextSystem = [
-        system || 'You are the Personal AI Hub assistant for this SoloHost AI Gateway. Guide the user using the app knowledge below. Be concise. Reply in the user language.',
-        appKnowledge ? `APP KNOWLEDGE (authoritative):\n${appKnowledge}` : '',
-        memories ? `Relevant recent private interaction memory:\n${memories}` : ''
-      ].filter(Boolean).join('\n\n');
+      // Transparent /v1 mode: pass client system + messages only. No Hub knowledge, no server memory, no default persona.
+      let contextSystem;
+      if (transparent) {
+        contextSystem = system || '';
+      } else {
+        const memApp = appId || 'hub-ui';
+        const memories = (state.memory || [])
+          .filter(x => (x.appId || 'hub-ui') === memApp)
+          .slice(-8)
+          .map(x => `${x.role}: ${x.content}`)
+          .join('\n');
+        const appKnowledge = (typeof knowledge === 'string' && knowledge.trim())
+          ? knowledge.trim()
+          : '';
+        contextSystem = [
+          system || 'You are the Personal AI Hub assistant for this SoloHost AI Gateway. Guide the user using the app knowledge below. Be concise. Reply in the user language.',
+          appKnowledge ? `APP KNOWLEDGE (authoritative):\n${appKnowledge}` : '',
+          memories ? `Relevant recent private interaction memory:\n${memories}` : ''
+        ].filter(Boolean).join('\n\n');
+      }
 
       const failures = [];
       for (const k of eligible) {
@@ -374,7 +401,7 @@ export function createAiKernel(options = {}) {
         const preferred = k.selectedModel || null;
         let candidates = [];
         const discovered = k.models || [];
-        // Only force client model if this key actually lists it
+        // Client-specified model ALWAYS wins when present on the key (or key has empty discovery list)
         const modelOnKey = model && (
           !discovered.length
           || discovered.includes(model)
@@ -384,11 +411,23 @@ export function createAiKernel(options = {}) {
         if (discovered.length) candidates.push(...discovered);
         else candidates.push(...(p.models || []));
         const stickyOk = preferred && (!discovered.length || discovered.includes(preferred));
-        candidates = rankModels(candidates, stickyOk ? preferred : null, k.id);
-        if (modelOnKey) candidates = [model, ...candidates.filter(m => m !== model)];
-        // Fast path: sticky healthy model first, then at most 2 alternates
-        if (stickyOk && preferred) {
-          candidates = [preferred, ...candidates.filter(m => m !== preferred)];
+        // Rank only when client did NOT request a specific model
+        if (!modelOnKey) {
+          candidates = rankModels(candidates, stickyOk ? preferred : null, k.id);
+          // Soft sticky: healthy preferred first among auto candidates
+          if (stickyOk && preferred) {
+            candidates = [preferred, ...candidates.filter(m => m !== preferred)];
+          }
+          // Vision preference: surface vision-capable models first when request has images
+          if (hasVision) {
+            const visionRe = /gpt-4o|gpt-4\.1|gemini|claude-3|claude-4|llava|vision|pixtral|qwen2-vl|qwen2\.5-vl/i;
+            const vis = candidates.filter(m => visionRe.test(m));
+            const rest = candidates.filter(m => !visionRe.test(m));
+            if (vis.length) candidates = [...vis, ...rest];
+          }
+        } else {
+          // Explicit client model: keep it first, never let sticky override (fixes R1)
+          candidates = [model, ...candidates.filter(m => m !== model)];
         }
 
         if (!candidates.length) {
@@ -416,10 +455,32 @@ export function createAiKernel(options = {}) {
                 if (live) p.baseUrl = live;
               }
               const providerForKey = k.baseUrl ? { ...p, baseUrl: k.baseUrl } : p;
+              const chatOpts = {
+                temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, hasVision
+              };
+              let msgs;
+              if (Array.isArray(messages) && messages.length) {
+                // Transparent multimodal: pass client messages as-is; prepend system only if contextSystem set and not already present
+                msgs = messages.map(m => ({ ...m }));
+                if (contextSystem) {
+                  const hasSys = msgs.some(m => m.role === 'system');
+                  if (!hasSys) msgs = [{ role: 'system', content: contextSystem }, ...msgs];
+                  else if (!transparent) {
+                    // Hub UI path may merge knowledge into first system
+                    const idx = msgs.findIndex(m => m.role === 'system');
+                    if (idx >= 0) msgs[idx] = { ...msgs[idx], content: contextSystem };
+                  }
+                }
+              } else {
+                msgs = contextSystem
+                  ? [{ role: 'system', content: contextSystem }, { role: 'user', content: message }]
+                  : [{ role: 'user', content: message }];
+              }
               result = await chatProvider(
                 providerForKey, token, chosen,
-                [{ role: 'system', content: contextSystem }, { role: 'user', content: message }],
-                fetchImpl
+                msgs,
+                fetchImpl,
+                chatOpts
               );
               const reply = String(result.reply || '').trim();
               if (!reply) {
@@ -454,8 +515,8 @@ export function createAiKernel(options = {}) {
 
               if (cls.class === 'MODEL_429' || cls.class === 'UPSTREAM_429' || candidateErr.status === 429) {
                 quotaHits += 1;
-                // Cooldown model only — keep key ACTIVE for other models
-                k.models = (k.models || []).filter(m => m !== chosen);
+                // v2: NEVER remove model from key list on 429 — only circuit-breaker cooldown (fixes R3)
+                recordRouteFailure(k.id, chosen, 'MODEL_429');
                 await logger.write('model.quota', 'warn', {
                   requestId, provider: k.provider, model: chosen, keyId: k.id,
                   status: 429, error: safeError(candidateErr), errorClass: cls.class
@@ -467,8 +528,9 @@ export function createAiKernel(options = {}) {
               if (suggested && isChatCapableModel(suggested) && !candidates.includes(suggested)) {
                 candidates.push(suggested);
               }
+              // 404: cooldown via metrics, do not permanently delete from key.models
               if (cls.class === 'MODEL_UNAVAILABLE' || candidateErr.status === 404) {
-                k.models = (k.models || []).filter(m => m !== chosen);
+                recordRouteFailure(k.id, chosen, 'MODEL_UNAVAILABLE');
               }
               await logger.write('model.unavailable', 'warn', {
                 requestId, provider: k.provider, model: chosen, keyId: k.id,
@@ -488,7 +550,7 @@ export function createAiKernel(options = {}) {
             throw lastModelError || new Error('PROVIDER_NO_USABLE_MODEL');
           }
 
-          const reply = normalizeAssistantReply(String(result.reply || '').trim());
+          const reply = normalizeAssistantReply(String(result.reply || '').trim(), { transparent });
           const now = new Date().toISOString();
           const latencyMs = Date.now() - (requestStartedAt || Date.now());
           recordRouteSuccess(k.id, result.model || chosen, latencyMs);
@@ -498,29 +560,32 @@ export function createAiKernel(options = {}) {
           k.useCount = (k.useCount || 0) + 1;
           k.retryAt = 0;
           k.consecutiveFailures = 0;
-          // Sticky preferred model — strong priority next request
+          // Sticky preferred model — strong priority next request (still useful for auto routing)
           k.selectedModel = result.model || chosen;
           if (result.model && isChatCapableModel(result.model)) {
             k.models = rankModels([result.model, ...(k.models || [])], result.model);
           }
 
-          state.memory.push({ role: 'user', content: message, ts: now, provider: k.provider, model: result.model, requestId, appId: appId || 'default' });
-          state.memory.push({ role: 'assistant', content: reply, ts: new Date().toISOString(), provider: k.provider, model: result.model, requestId, appId: appId || 'default' });
-          state.memory = state.memory.slice(-200);
+          // Never store gateway (/v1) traffic into Hub private memory or training pairs
+          if (!transparent) {
+            state.memory.push({ role: 'user', content: message, ts: now, provider: k.provider, model: result.model, requestId, appId: appId || 'default' });
+            state.memory.push({ role: 'assistant', content: reply, ts: new Date().toISOString(), provider: k.provider, model: result.model, requestId, appId: appId || 'default' });
+            state.memory = state.memory.slice(-200);
 
-          // Training pairs for local AI self-learning (cloud → local knowledge transfer)
-          if (k.provider !== 'local') {
-            state.training = state.training || [];
-            state.training.push({
-              id: requestId,
-              ts: now,
-              provider: k.provider,
-              model: result.model,
-              user: message,
-              assistant: reply,
-              appId: appId || 'default'
-            });
-            state.training = state.training.slice(-500);
+            // Training pairs for local AI self-learning (cloud → local knowledge transfer)
+            if (k.provider !== 'local') {
+              state.training = state.training || [];
+              state.training.push({
+                id: requestId,
+                ts: now,
+                provider: k.provider,
+                model: result.model,
+                user: message,
+                assistant: reply,
+                appId: appId || 'default'
+              });
+              state.training = state.training.slice(-500);
+            }
           }
 
           await saveState();
@@ -582,6 +647,127 @@ export function createAiKernel(options = {}) {
       };
     },
 
+    /**
+     * Streaming chat. Yields events: {type:'meta', provider, model, keyId, requestId}
+     * then {type:'delta', content}... then {type:'done', finish_reason, usage, model}
+     * or {type:'error', error, statusCode, message}.
+     * Transparent mode skips knowledge/memory injection (same as chat).
+     */
+    async *chatStream({ message, provider, model, system, appId, transparent = false, temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, signal } = {}) {
+      const requestId = crypto.randomUUID();
+      if (!message?.trim()) {
+        yield { type: 'error', error: 'MESSAGE_REQUIRED', statusCode: 400, message: 'messages required', requestId };
+        return;
+      }
+      let eligible = await chooseKeys(provider, model, !provider);
+      if (!eligible.length) eligible = await activatePendingKeys(provider, model, requestId);
+      if (!eligible.length && provider) eligible = await chooseKeys(provider, null, true);
+      if (!eligible.length) eligible = await chooseKeys(null, null, true);
+      if (!eligible.length) {
+        yield {
+          type: 'error',
+          error: 'NO_ACTIVE_KEY',
+          code: 'no_provider_configured',
+          statusCode: 503,
+          message: 'No usable AI provider key is configured.',
+          requestId
+        };
+        return;
+      }
+
+      let contextSystem;
+      if (transparent) {
+        contextSystem = system || '';
+      } else {
+        await loadState();
+        const memApp = appId || 'hub-ui';
+        const memories = (state.memory || [])
+          .filter(x => (x.appId || 'hub-ui') === memApp)
+          .slice(-8)
+          .map(x => `${x.role}: ${x.content}`)
+          .join('\n');
+        const appKnowledge = (typeof knowledge === 'string' && knowledge.trim()) ? knowledge.trim() : '';
+        contextSystem = [
+          system || 'You are the Personal AI Hub assistant for this SoloHost AI Gateway. Guide the user using the app knowledge below. Be concise. Reply in the user language.',
+          appKnowledge ? `APP KNOWLEDGE (authoritative):\n${appKnowledge}` : '',
+          memories ? `Relevant recent private interaction memory:\n${memories}` : ''
+        ].filter(Boolean).join('\n\n');
+      }
+
+      const msgs = contextSystem
+        ? [{ role: 'system', content: contextSystem }, { role: 'user', content: message }]
+        : [{ role: 'user', content: message }];
+      const chatOpts = { temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, signal };
+
+      for (const k of eligible) {
+        const p = providers[k.provider];
+        if (!p) continue;
+        const preferred = k.selectedModel || null;
+        const discovered = k.models || [];
+        const modelOnKey = model && (!discovered.length || discovered.includes(model) || preferred === model);
+        let candidates = [];
+        if (modelOnKey) candidates.push(model);
+        if (discovered.length) candidates.push(...discovered);
+        else candidates.push(...(p.models || []));
+        if (modelOnKey) candidates = [model, ...candidates.filter(m => m !== model)];
+        else if (preferred && (!discovered.length || discovered.includes(preferred))) {
+          candidates = [preferred, ...candidates.filter(m => m !== preferred)];
+        }
+        if (!candidates.length) continue;
+
+        const token = k.provider === 'local' ? '' : await vault.get(k.id);
+        if (k.provider !== 'local' && !token) continue;
+        if (k.provider === 'local') {
+          const live = local.baseUrl?.() || providers.local?.baseUrl;
+          if (live) p.baseUrl = live;
+        }
+        const providerForKey = k.baseUrl ? { ...p, baseUrl: k.baseUrl } : p;
+        const chosen = candidates[0];
+        yield { type: 'meta', provider: k.provider, model: chosen, keyId: k.id, requestId };
+
+        try {
+          let full = '';
+          let finish = 'stop';
+          let usage = null;
+          let servedModel = chosen;
+          for await (const ev of streamChatProvider(providerForKey, token, chosen, msgs, fetchImpl, chatOpts)) {
+            if (ev.type === 'delta' && ev.content) {
+              full += ev.content;
+              yield { type: 'delta', content: ev.content, model: ev.model || chosen };
+            } else if (ev.type === 'done') {
+              finish = ev.finish_reason || 'stop';
+              usage = ev.usage || null;
+              servedModel = ev.model || chosen;
+            } else if (ev.type === 'error') {
+              throw Object.assign(new Error(ev.error || 'STREAM_ERROR'), { status: ev.status || 502 });
+            }
+          }
+          // Soft sticky update
+          k.selectedModel = servedModel;
+          k.lastUsed = new Date().toISOString();
+          k.status = 'ACTIVE';
+          k.useCount = (k.useCount || 0) + 1;
+          await saveState();
+          yield { type: 'done', finish_reason: finish, usage, model: servedModel, provider: k.provider, keyId: k.id, requestId, reply: full };
+          return;
+        } catch (err) {
+          if (signal?.aborted) {
+            yield { type: 'error', error: 'CLIENT_ABORTED', statusCode: 499, message: 'Client disconnected', requestId };
+            return;
+          }
+          // try next key
+          continue;
+        }
+      }
+      yield {
+        type: 'error',
+        error: 'ALL_PROVIDERS_FAILED',
+        statusCode: 502,
+        message: 'All eligible AI routes failed for streaming.',
+        requestId
+      };
+    },
+
     async embed({ input, provider, model, appId } = {}) {
       const requestId = crypto.randomUUID();
       const values = Array.isArray(input) ? input : [input];
@@ -623,6 +809,16 @@ export function createAiKernel(options = {}) {
         if (!providers[provider]) throw Object.assign(new Error('UNKNOWN_PROVIDER'), { statusCode: 400 });
         if (!['local','custom'].includes(provider) && !token?.trim()) throw Object.assign(new Error('TOKEN_REQUIRED'), { statusCode: 400 });
         if (provider === 'custom' && !String(baseUrl || '').trim()) throw Object.assign(new Error('CUSTOM_BASE_URL_REQUIRED'), { statusCode: 400 });
+        if (provider === 'custom') {
+          const allowPrivate = process.env.AI_HUB_ALLOW_PRIVATE_PROVIDER_URLS === '1';
+          if (!allowPrivate) {
+            try { assertSafeProviderUrl(String(baseUrl).trim()); }
+            catch (e) {
+              const err = Object.assign(new Error('CUSTOM_BASE_URL_BLOCKED: private/localhost URLs require AI_HUB_ALLOW_PRIVATE_PROVIDER_URLS=1'), { statusCode: 400 });
+              throw err;
+            }
+          }
+        }
 
         // Detect mismatched token prefixes and warn via logs (still allow explicit provider).
         const hint = detectProviderHint(token);
@@ -916,7 +1112,7 @@ export function createAiKernel(options = {}) {
           };
         });
       },
-      async createToken({ name, type = 'app', limits = {} } = {}) {
+      async createToken({ name, type = 'app', limits = {}, allowed_models = null, allowed_endpoints = null, allow_fallback = true, expires_at = null, note = null } = {}) {
         await loadState();
         const kind = type === 'shared' ? 'shared' : 'app';
         const raw = 'pah_' + crypto.randomBytes(24).toString('base64url');
@@ -931,6 +1127,11 @@ export function createAiKernel(options = {}) {
           createdAt: new Date().toISOString(),
           lastUsed: null,
           _lastPersist: 0,
+          note: note ? String(note).slice(0, 200) : null,
+          expiresAt: expires_at || limits.expiresAt || null,
+          allowedModels: Array.isArray(allowed_models) ? allowed_models.map(String).slice(0, 50) : (Array.isArray(limits.allowedModels) ? limits.allowedModels.map(String).slice(0, 50) : null),
+          allowedEndpoints: Array.isArray(allowed_endpoints) ? allowed_endpoints.map(String).slice(0, 20) : (Array.isArray(limits.allowedEndpoints) ? limits.allowedEndpoints.map(String).slice(0, 20) : null),
+          allowFallback: allow_fallback !== false && limits.allowFallback !== false,
           limits: {
             perMinute: Number(limits.perMinute || process.env.AI_HUB_GATEWAY_RATE_LIMIT_PER_MIN || 60),
             maxConcurrent: Number(limits.maxConcurrent || process.env.AI_HUB_GATEWAY_MAX_CONCURRENT || 10),
@@ -945,7 +1146,9 @@ export function createAiKernel(options = {}) {
         await logger.write('gateway.token.created', 'info', { tokenId: id, name: entry.name, type: kind });
         return {
           id, name: entry.name, type: kind, status: 'unbound', appId: null,
-          token: raw, prefix: entry.prefix, createdAt: entry.createdAt, limits: entry.limits
+          token: raw, prefix: entry.prefix, createdAt: entry.createdAt, limits: entry.limits,
+          allowedModels: entry.allowedModels, allowedEndpoints: entry.allowedEndpoints,
+          allowFallback: entry.allowFallback, expiresAt: entry.expiresAt, note: entry.note
         };
       },
       async revokeToken(id) {
@@ -957,7 +1160,7 @@ export function createAiKernel(options = {}) {
             delete state.gatewayUsage[k];
           }
         }
-        try { await vault.del?.(`gateway:${id}`); } catch {}
+        try { await vault.remove(`gateway:${id}`); } catch {}
         await saveState();
         await logger.write('gateway.token.revoked', 'info', { tokenId: id });
         return { success: true, deleted: id };
@@ -982,6 +1185,16 @@ export function createAiKernel(options = {}) {
         const hash = crypto.createHash('sha256').update(String(raw)).digest('hex');
         const hit = (state.gatewayTokens || []).find(t => t.hash === hash);
         if (!hit) return null;
+        // Expiry check
+        if (hit.expiresAt) {
+          const exp = Date.parse(hit.expiresAt);
+          if (Number.isFinite(exp) && exp < Date.now()) {
+            const e = new Error('TOKEN_EXPIRED');
+            e.statusCode = 401;
+            e.code = 'TOKEN_EXPIRED';
+            throw e;
+          }
+        }
         const kind = hit.type || 'app';
         const claimed = appId ? String(appId).slice(0, 80) : null;
 
@@ -1010,7 +1223,11 @@ export function createAiKernel(options = {}) {
           name: hit.name,
           type: kind,
           appId: hit.appId || claimed || null,
-          status: hit.appId ? 'bound' : 'unbound'
+          status: hit.appId ? 'bound' : 'unbound',
+          allowedModels: hit.allowedModels || null,
+          allowedEndpoints: hit.allowedEndpoints || null,
+          allowFallback: hit.allowFallback !== false,
+          expiresAt: hit.expiresAt || null
         };
       },
       async usage({ tokenId = null, appId = null } = {}) {

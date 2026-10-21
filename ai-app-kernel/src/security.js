@@ -3,18 +3,28 @@
  */
 const buckets = new Map(); // key -> { count, resetAt, concurrent }
 
+// Periodic cleanup so Map does not grow forever
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, b] of buckets) {
+    if (b.resetAt <= now && b.concurrent === 0) buckets.delete(k);
+  }
+}, 120_000).unref?.();
+
 export function createRateLimiter({
   perMinute = 60,
   maxConcurrent = 10
 } = {}) {
+  // Each limiter gets its own Map so admin login and gateway do not share counters
+  const localBuckets = new Map();
   return {
     tryAcquire(tokenId) {
       const id = tokenId || 'anonymous';
       const now = Date.now();
-      let b = buckets.get(id);
+      let b = localBuckets.get(id);
       if (!b || b.resetAt <= now) {
         b = { count: 0, resetAt: now + 60_000, concurrent: 0 };
-        buckets.set(id, b);
+        localBuckets.set(id, b);
       }
       if (b.concurrent >= maxConcurrent) {
         return { ok: false, status: 429, retryAfter: 1, reason: 'CONCURRENT_LIMIT' };
@@ -26,7 +36,9 @@ export function createRateLimiter({
       b.count += 1;
       b.concurrent += 1;
       return { ok: true, release: () => { b.concurrent = Math.max(0, b.concurrent - 1); } };
-    }
+    },
+    // Expose for tests / admin diagnostics
+    _size() { return localBuckets.size; }
   };
 }
 

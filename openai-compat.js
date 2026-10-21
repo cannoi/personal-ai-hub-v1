@@ -12,10 +12,57 @@ function extractText(content) {
     return content.map(part => {
       if (typeof part === 'string') return part;
       if (part?.type === 'text') return part.text || '';
+      if (part?.type === 'image_url') return '[image]';
+      if (part?.type === 'input_audio') return '[audio]';
+      if (part?.type === 'file') return '[file]';
       return '';
     }).join('');
   }
   return String(content);
+}
+
+/** True if any message has non-text multimodal parts */
+function hasMultimodal(messages) {
+  for (const msg of messages || []) {
+    const c = msg?.content;
+    if (!Array.isArray(c)) continue;
+    for (const part of c) {
+      if (part && typeof part === 'object' && part.type && part.type !== 'text') return true;
+    }
+  }
+  return false;
+}
+
+/** Normalize OpenAI-style messages for upstream (preserve image_url parts) */
+function normalizeMessagesForUpstream(messages) {
+  const out = [];
+  for (const msg of messages || []) {
+    const role = String(msg?.role || 'user');
+    if (role === 'tool') {
+      out.push({ role: 'tool', content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''), tool_call_id: msg.tool_call_id });
+      continue;
+    }
+    const mappedRole = role === 'developer' ? 'system' : role;
+    const content = msg?.content ?? msg?.text;
+    if (Array.isArray(content)) {
+      const parts = content.map(part => {
+        if (typeof part === 'string') return { type: 'text', text: part };
+        if (part?.type === 'text') return { type: 'text', text: part.text || '' };
+        if (part?.type === 'image_url') {
+          const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+          return { type: 'image_url', image_url: { url: url || '', detail: part.image_url?.detail || 'auto' } };
+        }
+        if (part?.type === 'input_audio') return part;
+        if (part?.type === 'file') return part;
+        return { type: 'text', text: String(part?.text || '') };
+      }).filter(Boolean);
+      out.push({ role: mappedRole, content: parts });
+    } else {
+      out.push({ role: mappedRole, content: content == null ? '' : String(content) });
+    }
+    if (msg.tool_calls) out[out.length - 1].tool_calls = msg.tool_calls;
+  }
+  return out;
 }
 
 function parseModel(model) {
@@ -193,14 +240,21 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
   const gatewayAuth = async (req, res, next) => {
     try {
       const tokens = await kernel.gateway.listTokens();
-      if (!tokens.length) return next();
+      if (!tokens.length) {
+        return res.status(401).json({
+          error: {
+            message: "No gateway tokens configured. Create a token in Hub Settings first.",
+            type: "authentication_error",
+            code: "no_tokens_configured"
+          }
+        });
+      }
       const hdr = req.headers['x-personal-ai-key']
         || (String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i) || [])[1];
       if (req.query?.api_key) {
         return res.status(401).json({ error: { message: 'API keys in query parameters are not supported. Use Authorization: Bearer or X-Personal-AI-Key.', type: 'invalid_request_error', code: 'API_KEY_IN_QUERY_NOT_ALLOWED' } });
       }
       if (!hdr) {
-        if (isBrowserSameOrigin(req)) return next();
         return res.status(401).json({
           error: {
             message: 'Missing API key. Send Authorization: Bearer pah_… or X-Personal-AI-Key.',
@@ -236,19 +290,64 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       }
       const lease = await kernel.gateway.acquire(hdr, { appId: appIdHdr });
       if (!lease) return res.status(401).json({ error: { message: 'Invalid API key', type: 'invalid_request_error', code: 'INVALID_GATEWAY_TOKEN' } });
-      req.gatewayApp = lease;
+      // Endpoint scope (token.allowedEndpoints)
+      const allowedEp = lease.allowedEndpoints || ok.allowedEndpoints;
+      if (Array.isArray(allowedEp) && allowedEp.length) {
+        const path = String(req.path || req.url || '').split('?')[0];
+        const norm = path.replace(/^\/openai/, '');
+        const okEp = allowedEp.some(ep => {
+          const e = String(ep);
+          return norm === e || norm.endsWith(e) || norm.includes(e);
+        });
+        if (!okEp) {
+          return res.status(403).json({
+            error: {
+              message: `This token is not allowed to call ${norm}`,
+              type: 'permission_error',
+              code: 'endpoint_not_allowed',
+              param: 'allowed_endpoints'
+            }
+          });
+        }
+      }
+      req.gatewayApp = { ...lease, ...ok };
       req.gatewayTokenId = lease.id;
       req.gatewayTokenRaw = hdr;
       req.gatewayLease = lease;
+      req.gatewayScope = {
+        allowedModels: ok.allowedModels || lease.allowedModels || null,
+        allowedEndpoints: allowedEp || null,
+        allowFallback: ok.allowFallback !== false
+      };
       return next();
     } catch (e) {
-      return res.status(500).json({
-        error: { message: String(e?.message || e), type: 'api_error', code: 'AUTH_ERROR' }
+      const code = e.code || (e.statusCode === 401 ? 'TOKEN_EXPIRED' : 'AUTH_ERROR');
+      const status = e.statusCode || 500;
+      return res.status(status).json({
+        error: { message: String(e?.message || e), type: status === 401 ? 'authentication_error' : 'api_error', code }
       });
     }
   };
 
-  const listModels = asyncRoute(async (_req, res) => {
+  function assertModelAllowed(req, modelId) {
+    const allowed = req.gatewayScope?.allowedModels;
+    if (!Array.isArray(allowed) || !allowed.length) return null;
+    if (!modelId || modelId === 'auto' || modelId === 'auto-vision' || modelId === 'auto-fast' || modelId === 'auto-best') return null;
+    const id = String(modelId);
+    const ok = allowed.some(m => id === m || id.endsWith('/' + m) || id.startsWith(m + '/') || id.includes(m));
+    if (ok) return null;
+    return {
+      status: 403,
+      error: {
+        message: `Model '${id}' is not allowed for this token`,
+        type: 'permission_error',
+        code: 'model_not_allowed',
+        param: 'model'
+      }
+    };
+  }
+
+  const listModels = asyncRoute(async (req, res) => {
     const seen = new Set();
     const data = [];
     const push = (entry) => {
@@ -283,8 +382,8 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
             latency_ms: detail?.loaded ? 50 : 2000
           });
           push(entry(null, name));
+          // Alias only once for local disambiguation
           push(entry(null, `local/${name}`));
-          push(entry(null, `ollama/${name}`));
         }
       }
     } catch {}
@@ -297,14 +396,23 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
         const health = k.status === 'ACTIVE' ? 'ready' : String(k.status || 'unknown').toLowerCase();
         for (const m of k.models || []) {
           push(buildModelEntry({ id: m, owned_by: k.provider, provider: k.provider, health }));
-          push(buildModelEntry({ id: `${k.provider}/${m}`, owned_by: k.provider, provider: k.provider, health }));
+          // Prefix form only when bare id already taken by another provider
+          const prefixed = `${k.provider}/${m}`;
+          if (seen.has(m) && m !== prefixed) {
+            push(buildModelEntry({ id: prefixed, owned_by: k.provider, provider: k.provider, health }));
+          }
         }
       }
     } catch {}
 
+    const allowed = req.gatewayScope?.allowedModels;
+    let out = data;
+    if (Array.isArray(allowed) && allowed.length) {
+      out = data.filter(m => m.id === 'auto' || m.id === 'auto-vision' || allowed.some(a => String(m.id) === a || String(m.id).endsWith('/' + a) || String(m.id).includes(a)));
+    }
     res.json({
       object: 'list',
-      data,
+      data: out,
       hub: {
         local: {
           available: !!localMeta.available,
@@ -320,30 +428,145 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
   const chatCompletions = asyncRoute(async (req, res) => {
     const body = req.body || {};
     const parsed = parseModel(body.model);
+    const modelDenied = assertModelAllowed(req, body.model);
+    if (modelDenied) return res.status(modelDenied.status).json({ error: modelDenied.error });
     const { message, system } = messagesToPrompt(body.messages);
     if (!message) return res.status(400).json({ error: { message: 'messages required', type: 'invalid_request_error', code: 'MESSAGES_REQUIRED' } });
     const requestId = req.headers['x-request-id'] || `chatcmpl-${randomUUID().replace(/-/g, '').slice(0, 24)}`;
     const appId = req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || body.user || null;
     const started = Date.now();
-    const result = await kernel.chat({ message, system: system || undefined, provider: parsed.provider || undefined, model: parsed.model || undefined, requestId, appId });
+    const id = requestId.startsWith('chatcmpl-') ? requestId : `chatcmpl-${requestId}`;
+    const multimodal = hasMultimodal(body.messages);
+    const upstreamMessages = multimodal ? normalizeMessagesForUpstream(body.messages) : null;
+    // Prefer vision-capable model when images present and client asked auto
+    let routeModel = parsed.model || undefined;
+    let routeProvider = parsed.provider || undefined;
+    if (multimodal && (!body.model || body.model === 'auto' || body.model === 'default')) {
+      routeModel = 'auto-vision';
+    }
+    const chatArgs = {
+      message, system: system || undefined,
+      messages: upstreamMessages, // full multimodal messages when present
+      provider: routeProvider, model: routeModel,
+      appId, transparent: true,
+      temperature: body.temperature, max_tokens: body.max_tokens ?? body.max_completion_tokens,
+      top_p: body.top_p, stop: body.stop, seed: body.seed,
+      response_format: body.response_format, tools: body.tools, tool_choice: body.tool_choice,
+      hasVision: multimodal
+    };
+
+    // --- True SSE streaming path ---
+    if (body.stream === true) {
+      res.status(200);
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.setHeader('X-Request-Id', requestId);
+      res.flushHeaders?.();
+
+      const ac = new AbortController();
+      const onClose = () => { try { ac.abort(); } catch {} };
+      req.on('close', onClose);
+      req.on('aborted', onClose);
+
+      let usage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+      let servedModel = body.model || 'auto';
+      let provider = null;
+      let keyId = null;
+      let hadError = false;
+      let firstDelta = true;
+      const created = Math.floor(Date.now() / 1000);
+      // keep-alive every 15s
+      const keepAlive = setInterval(() => {
+        try { res.write(': keep-alive\n\n'); } catch {}
+      }, 15000);
+
+      try {
+        for await (const ev of kernel.chatStream({ ...chatArgs, signal: ac.signal })) {
+          if (ev.type === 'meta') {
+            provider = ev.provider;
+            keyId = ev.keyId;
+            servedModel = ev.model || servedModel;
+            continue;
+          }
+          if (ev.type === 'delta' && ev.content) {
+            if (ev.model) servedModel = ev.model;
+            const delta = firstDelta
+              ? { role: 'assistant', content: ev.content }
+              : { content: ev.content };
+            firstDelta = false;
+            res.write(`data: ${JSON.stringify({
+              id, object: 'chat.completion.chunk', created, model: servedModel,
+              choices: [{ index: 0, delta, finish_reason: null }]
+            })}\n\n`);
+            continue;
+          }
+          if (ev.type === 'done') {
+            if (ev.model) servedModel = ev.model;
+            if (ev.usage) usage = ev.usage;
+            res.write(`data: ${JSON.stringify({
+              id, object: 'chat.completion.chunk', created, model: servedModel,
+              choices: [{ index: 0, delta: {}, finish_reason: ev.finish_reason || 'stop' }]
+            })}\n\n`);
+            if (body.stream_options?.include_usage === true && usage) {
+              res.write(`data: ${JSON.stringify({
+                id, object: 'chat.completion.chunk', created, model: servedModel,
+                choices: [], usage
+              })}\n\n`);
+            }
+            res.write('data: [DONE]\n\n');
+            break;
+          }
+          if (ev.type === 'error') {
+            hadError = true;
+            // If headers already sent, emit error as SSE comment then end
+            const status = ev.statusCode || 502;
+            res.write(`data: ${JSON.stringify({
+              id, object: 'chat.completion.chunk', created, model: servedModel,
+              choices: [{ index: 0, delta: {}, finish_reason: 'stop' }],
+              error: { message: ev.message || ev.error, type: 'api_error', code: ev.error || 'STREAM_ERROR' }
+            })}\n\n`);
+            res.write('data: [DONE]\n\n');
+            break;
+          }
+        }
+      } catch (err) {
+        hadError = true;
+        try {
+          res.write(`data: ${JSON.stringify({
+            error: { message: String(err?.message || err).slice(0, 400), type: 'api_error', code: 'STREAM_FAILED' }
+          })}\n\n`);
+          res.write('data: [DONE]\n\n');
+        } catch {}
+      } finally {
+        clearInterval(keepAlive);
+        req.off?.('close', onClose);
+        req.off?.('aborted', onClose);
+        await kernel.gateway.recordUsage({
+          tokenId: req.gatewayTokenId, appId, usage, error: hadError, client: clientFromReq(req)
+        });
+        if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
+        try { res.end(); } catch {}
+      }
+      return;
+    }
+
+    // --- Non-streaming path ---
+    const result = await kernel.chat({ ...chatArgs, requestId });
     const usage = result.usage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
     await kernel.gateway.recordUsage({ tokenId: req.gatewayTokenId, appId, usage, error: !!result.error, client: clientFromReq(req) });
     if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
-    const id = requestId.startsWith('chatcmpl-') ? requestId : `chatcmpl-${requestId}`;
 
-    // OpenAI-compatible clients expect non-2xx + error object when the upstream chat failed.
-    // Returning HTTP 200 with empty content breaks Universal AI modules and other SDKs
-    // ("provider returned no text content") even though the Hub knows the real failure.
     if (result && result.error) {
       let status = 502;
       const code = String(result.error || 'AI_PROVIDER_ERROR');
-      if (/NO_ACTIVE_KEY|NO_PROVIDER|ALL_PROVIDERS/i.test(code)) status = 503;
+      if (/NO_ACTIVE_KEY|NO_PROVIDER|ALL_PROVIDERS|no_provider/i.test(code)) status = 503;
       if (/RATE_LIMIT|USAGE_QUOTA|QUOTA/i.test(code) || /429/.test(String(result.message || ''))) status = 429;
       if (/AUTH|INVALID_GATEWAY|FORBIDDEN/i.test(code)) status = 401;
       return res.status(status).json({
         error: {
           message: String(result.message || result.error || 'AI provider unavailable').slice(0, 700),
-          type: status === 401 ? 'invalid_request_error' : 'api_error',
+          type: status === 401 ? 'authentication_error' : (status === 503 ? 'api_error' : 'api_error'),
           code: code.slice(0, 64),
           request_id: result.requestId || requestId,
           personal_ai_hub: {
@@ -358,10 +581,9 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
 
     const content = String(result.reply || '').trim();
     if (!content) {
-      // Defensive: success path must never hand empty assistant content to OpenAI clients.
       return res.status(502).json({
         error: {
-          message: 'Personal AI Hub returned an empty assistant message. Check Settings → Activity Log and Test provider keys.',
+          message: 'Upstream returned an empty assistant message. Check Settings → Activity Log and Test provider keys.',
           type: 'api_error',
           code: 'EMPTY_ASSISTANT_CONTENT',
           request_id: result.requestId || requestId
@@ -370,26 +592,18 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     }
 
     const payload = {
-      id, object: 'chat.completion', created: Math.floor(Date.now()/1000), model: result.model || body.model || 'auto',
+      id, object: 'chat.completion', created: Math.floor(Date.now() / 1000),
+      model: result.model || body.model || 'auto',
       choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: result.finishReason || 'stop', logprobs: null }],
       usage,
-      personal_ai_hub: { provider: result.provider || null, keyId: result.keyId || null, requestId: result.requestId || requestId, latencyMs: Date.now()-started, appId }
-    };
-    if (body.stream === true) {
-      res.status(200);
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache');
-      res.setHeader('Connection', 'keep-alive');
-      const chunk = { id, object:'chat.completion.chunk', created:payload.created, model:payload.model, choices:[{index:0,delta:{role:'assistant',content:result.reply||''},finish_reason:null}] };
-      res.write(`data: ${JSON.stringify(chunk)}\n\n`);
-      res.write(`data: ${JSON.stringify({...chunk, choices:[{index:0,delta:{},finish_reason:result.finishReason || 'stop'}]})}\n\n`);
-      if (body.stream_options?.include_usage === true) {
-        res.write(`data: ${JSON.stringify({id,object:'chat.completion.chunk',created:payload.created,model:payload.model,choices:[],usage})}\n\n`);
+      personal_ai_hub: {
+        provider: result.provider || null, keyId: result.keyId || null,
+        requestId: result.requestId || requestId, latencyMs: Date.now() - started, appId
       }
-      res.write(`data: [DONE]\n\n`);
-      return res.end();
-    }
+    };
     res.setHeader('X-Request-Id', requestId);
+    if (result.provider) res.setHeader('X-Hub-Provider', String(result.provider));
+    if (result.model) res.setHeader('X-Hub-Model', String(result.model));
     return res.json(payload);
   });
 
@@ -415,7 +629,14 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     const parsed = parseModel(body.model);
     const requestId = req.headers['x-request-id'] || `resp-${randomUUID().replace(/-/g,'').slice(0,24)}`;
     const appId = req.headers['x-solohost-app-id'] || req.gatewayApp?.appId || null;
-    const result = await kernel.chat({ message:input, system: combinedSystem || undefined, provider:parsed.provider || undefined, model:parsed.model || undefined, appId, requestId });
+    const result = await kernel.chat({
+      message: input, system: combinedSystem || undefined,
+      provider: parsed.provider || undefined, model: parsed.model || undefined,
+      appId, requestId, transparent: true,
+      temperature: body.temperature, max_tokens: body.max_tokens ?? body.max_completion_tokens,
+      top_p: body.top_p, stop: body.stop, seed: body.seed,
+      response_format: body.response_format, tools: body.tools, tool_choice: body.tool_choice
+    });
     const usage = result.usage || {prompt_tokens:0,completion_tokens:0,total_tokens:0};
     await kernel.gateway.recordUsage({tokenId:req.gatewayTokenId,appId,usage,error:!!result.error,client:clientFromReq(req)});
     if (req.gatewayLease?.slot) req.gatewayLease.slot.release();
@@ -467,6 +688,8 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
 
   const embeddings = asyncRoute(async (req, res) => {
     const body=req.body||{};
+    const modelDenied = assertModelAllowed(req, body.model);
+    if (modelDenied) return res.status(modelDenied.status).json({ error: modelDenied.error });
     if (!body.input || (Array.isArray(body.input) && !body.input.length)) return res.status(400).json({error:{message:'input required',type:'invalid_request_error',code:'INPUT_REQUIRED'}});
     const parsed=parseModel(body.model);
     const appId=req.headers['x-solohost-app-id']||req.gatewayApp?.appId||null;
@@ -507,14 +730,111 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     res.json({ ok: true, service: serviceName, layer: 'openai-compat' });
   };
 
+
+  const getModel = asyncRoute(async (req, res) => {
+    const id = decodeURIComponent(String(req.params.id || '')).trim();
+    if (!id) return res.status(400).json({ error: { message: 'model id required', type: 'invalid_request_error', code: 'MODEL_ID_REQUIRED' } });
+    // Reuse list and find — simple and consistent
+    const fakeRes = {
+      statusCode: 200,
+      body: null,
+      json(obj) { this.body = obj; },
+      status(c) { this.statusCode = c; return this; }
+    };
+    // Build list inline by calling listModels logic is heavy; duplicate minimal lookup
+    const models = [];
+    const seen = new Set();
+    const push = (e) => { if (e?.id && !seen.has(e.id)) { seen.add(e.id); models.push(e); } };
+    push(buildModelEntry({ id: 'auto', owned_by: 'personal-ai-hub', provider: 'personal-ai-hub', health: 'ready' }));
+    try {
+      const localMeta = await kernel.local.models() || {};
+      if (localMeta?.available && Array.isArray(localMeta.models)) {
+        for (const m of localMeta.models) {
+          const name = typeof m === 'string' ? m : (m?.name || m?.model);
+          if (name) {
+            push(buildModelEntry({ id: name, owned_by: 'local', provider: 'local', health: 'ready' }));
+            push(buildModelEntry({ id: `local/${name}`, owned_by: 'local', provider: 'local', health: 'ready' }));
+          }
+        }
+      }
+    } catch {}
+    try {
+      const keys = await kernel.keys.listKeys();
+      for (const k of keys) {
+        if (k.status === 'INVALID' || k.status === 'BILLING_REQUIRED') continue;
+        if (k.provider === 'local') continue;
+        for (const m of k.models || []) {
+          push(buildModelEntry({ id: m, owned_by: k.provider, provider: k.provider, health: k.status === 'ACTIVE' ? 'ready' : 'unknown' }));
+          push(buildModelEntry({ id: `${k.provider}/${m}`, owned_by: k.provider, provider: k.provider, health: k.status === 'ACTIVE' ? 'ready' : 'unknown' }));
+        }
+      }
+    } catch {}
+    const hit = models.find(m => m.id === id);
+    if (!hit) {
+      return res.status(404).json({
+        error: { message: `The model '${id}' does not exist`, type: 'invalid_request_error', code: 'model_not_found', param: 'model' }
+      });
+    }
+    return res.json(hit);
+  });
+
+
+  const unsupported = (capability, hint) => asyncRoute(async (_req, res) => {
+    res.status(400).json({
+      error: {
+        message: `${capability} is not enabled on this Personal AI Hub build. ${hint || ''}`.trim(),
+        type: 'invalid_request_error',
+        code: 'unsupported_capability',
+        param: capability
+      }
+    });
+  });
+
+  // Audio: accept multipart contract shape; if no suitable provider, return clear 400
+  const audioTranscriptions = asyncRoute(async (req, res) => {
+    // Full Whisper proxy needs multipart parsing (busboy). Until then, clear capability error.
+    return res.status(400).json({
+      error: {
+        message: 'Audio transcription requires a Whisper-capable provider key and multipart upload support. Add OpenAI/Groq whisper model or use a provider that supports /audio/transcriptions, then upgrade Hub for multipart.',
+        type: 'invalid_request_error',
+        code: 'unsupported_capability',
+        param: 'audio.transcriptions'
+      }
+    });
+  });
+  const audioSpeech = asyncRoute(async (req, res) => {
+    return res.status(400).json({
+      error: {
+        message: 'Text-to-speech requires a TTS-capable provider (e.g. OpenAI tts-1). Configure that key and model, then retry in a later Hub build with /v1/audio/speech proxy.',
+        type: 'invalid_request_error',
+        code: 'unsupported_capability',
+        param: 'audio.speech'
+      }
+    });
+  });
+  const imagesGenerations = asyncRoute(async (req, res) => {
+    return res.status(400).json({
+      error: {
+        message: 'Image generation requires a provider with image models (e.g. DALL·E, Flux). Not enabled in this build; use a dedicated image API or wait for Hub image proxy.',
+        type: 'invalid_request_error',
+        code: 'unsupported_capability',
+        param: 'images.generations'
+      }
+    });
+  });
+
   // Explicit full paths — registered on the root app so nothing can strip /v1
   const paths = [
     ['get', '/v1/__ping', [ping]],
     ['get', '/v1/health', [health]],
     ['get', '/v1/models', [gatewayAuth, listModels]],
+    ['get', '/v1/models/:id', [gatewayAuth, getModel]],
     ['post', '/v1/chat/completions', [gatewayAuth, chatCompletions]],
     ['post', '/v1/responses', [gatewayAuth, responses]],
     ['post', '/v1/embeddings', [gatewayAuth, embeddings]],
+    ['post', '/v1/audio/transcriptions', [gatewayAuth, audioTranscriptions]],
+    ['post', '/v1/audio/speech', [gatewayAuth, audioSpeech]],
+    ['post', '/v1/images/generations', [gatewayAuth, imagesGenerations]],
     ['get', '/v1/chat/completions', [(_req, res) => res.status(405).json({
       error: { message: 'Use POST /v1/chat/completions', type: 'invalid_request_error', code: 'METHOD_NOT_ALLOWED' }
     })]],
@@ -522,9 +842,13 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     ['get', '/openai/v1/__ping', [ping]],
     ['get', '/openai/v1/health', [health]],
     ['get', '/openai/v1/models', [gatewayAuth, listModels]],
+    ['get', '/openai/v1/models/:id', [gatewayAuth, getModel]],
     ['post', '/openai/v1/chat/completions', [gatewayAuth, chatCompletions]],
     ['post', '/openai/v1/responses', [gatewayAuth, responses]],
-    ['post', '/openai/v1/embeddings', [gatewayAuth, embeddings]]
+    ['post', '/openai/v1/embeddings', [gatewayAuth, embeddings]],
+    ['post', '/openai/v1/audio/transcriptions', [gatewayAuth, audioTranscriptions]],
+    ['post', '/openai/v1/audio/speech', [gatewayAuth, audioSpeech]],
+    ['post', '/openai/v1/images/generations', [gatewayAuth, imagesGenerations]]
   ];
 
   for (const [method, path, handlers] of paths) {

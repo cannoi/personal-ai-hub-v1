@@ -23,7 +23,7 @@ const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.AI_HUB_PUBLI
 await mkdir(DATA_DIR, { recursive: true });
 
 const app = express();
-app.set('trust proxy', true);
+app.set('trust proxy', process.env.AI_HUB_TRUST_PROXY || 'loopback,uniquelocal');
 
 // --- CORS + security headers ---
 const ALLOWED_ORIGINS = String(process.env.AI_HUB_ALLOWED_ORIGINS || '')
@@ -53,7 +53,7 @@ app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.setHeader(
     'Access-Control-Allow-Headers',
-    'Content-Type, Authorization, X-Personal-AI-Key, X-SoloHost-App-ID, X-Request-Id'
+    'Content-Type, Authorization, X-Personal-AI-Key, X-SoloHost-App-ID, X-Request-Id, openai-organization, openai-project, x-stainless-lang, x-stainless-package-version, x-stainless-os, x-stainless-arch, x-stainless-runtime, x-stainless-runtime-version'
   );
   res.setHeader('Access-Control-Expose-Headers', 'X-Request-Id, Retry-After');
   if (req.method === 'OPTIONS') return res.status(204).end();
@@ -69,7 +69,7 @@ const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-m
 const feedbackService = createFeedbackService({
   appId: 'personal-ai-hub',
   appName: 'Personal AI Hub',
-  version: '1.8.14'
+  version: '2.0.0'
 });
 mountFeedbackRoutes(app, feedbackService);
 
@@ -144,11 +144,37 @@ const ai = createAiKernel({
 });
 
 
-// --- Admin authentication (password from AI_HUB_ADMIN_PASSWORD) ---
-const ADMIN_PASSWORD = String(process.env.AI_HUB_ADMIN_PASSWORD || '').trim();
+// --- Admin authentication (password from AI_HUB_ADMIN_PASSWORD or auto-generated) ---
+let ADMIN_PASSWORD = String(process.env.AI_HUB_ADMIN_PASSWORD || '').trim();
 const sessions = new Map(); // sid -> { exp }
 const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 const adminLoginLimiter = createRateLimiter({ perMinute: Number(process.env.AI_HUB_ADMIN_LOGIN_PER_MIN || 10), maxConcurrent: 2 });
+const ADMIN_PASS_FILE = path.join(DATA_DIR, '.admin-password');
+
+async function ensureAdminPassword() {
+  if (ADMIN_PASSWORD) return ADMIN_PASSWORD;
+  try {
+    const existing = (await (await import('node:fs/promises')).readFile(ADMIN_PASS_FILE, 'utf8')).trim();
+    if (existing) { ADMIN_PASSWORD = existing; return ADMIN_PASSWORD; }
+  } catch {}
+  // Generate once, log clearly, persist for restarts (user must change via env for production)
+  ADMIN_PASSWORD = crypto.randomBytes(15).toString('base64url').slice(0, 20);
+  try {
+    await (await import('node:fs/promises')).writeFile(ADMIN_PASS_FILE, ADMIN_PASSWORD, { mode: 0o600 });
+  } catch (e) {
+    console.warn('[admin] could not persist generated password file:', e?.message);
+  }
+  console.log('');
+  console.log('================================================================');
+  console.log('  Personal AI Hub — ADMIN PASSWORD (generated on first start)');
+  console.log('  Password: ' + ADMIN_PASSWORD);
+  console.log('  Save this password. Set AI_HUB_ADMIN_PASSWORD in config to override.');
+  console.log('================================================================');
+  console.log('');
+  return ADMIN_PASSWORD;
+}
+// Kick off password ensure early (non-blocking; login will await if needed)
+const adminPasswordReady = ensureAdminPassword();
 
 function parseCookies(req) {
   const raw = req.headers.cookie || '';
@@ -161,7 +187,8 @@ function parseCookies(req) {
 }
 
 function isAdmin(req) {
-  if (!ADMIN_PASSWORD) return true; // open control plane until password configured
+  // Never open control plane. Password always required (generated if missing).
+  if (!ADMIN_PASSWORD) return false;
   const sid = parseCookies(req).ai_hub_admin;
   const s = sid && sessions.get(sid);
   if (!s) return false;
@@ -174,17 +201,20 @@ function requireAdmin(req, res, next) {
   return res.status(401).json({ error: 'ADMIN_REQUIRED', message: 'Admin login required' });
 }
 
-app.post('/api/v1/admin/login', express.json(), (req, res) => {
+app.post('/api/v1/admin/login', express.json(), async (req, res) => {
+  await adminPasswordReady;
   const slot = adminLoginLimiter.tryAcquire(req.ip || req.headers['x-forwarded-for'] || 'admin');
   if (!slot.ok) { res.setHeader('Retry-After', String(slot.retryAfter || 60)); return res.status(429).json({ error: 'LOGIN_RATE_LIMIT', message: 'Too many login attempts. Try again later.' }); }
-  if (!ADMIN_PASSWORD) { slot.release();
-    return res.json({ ok: true, mode: 'open', message: 'AI_HUB_ADMIN_PASSWORD not set — set it in SoloHost config to lock the admin UI' });
+  if (!ADMIN_PASSWORD) {
+    slot.release();
+    return res.status(503).json({ error: 'ADMIN_PASSWORD_NOT_READY', message: 'Admin password is being generated. Retry in a moment.' });
   }
   const password = String(req.body?.password || '');
   // Constant-time compare via SHA-256 digests (equal length)
   const dig = (s) => crypto.createHash('sha256').update(String(s)).digest();
   const ok = crypto.timingSafeEqual(dig(password), dig(ADMIN_PASSWORD));
   if (!ok) {
+    slot.release();
     return res.status(401).json({ error: 'INVALID_PASSWORD', message: 'Wrong admin password' });
   }
   slot.release();
@@ -193,7 +223,7 @@ app.post('/api/v1/admin/login', express.json(), (req, res) => {
   const secure = req.secure || req.headers['x-forwarded-proto'] === 'https';
   res.setHeader(
     'Set-Cookie',
-    `ai_hub_admin=${encodeURIComponent(sid)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secure ? '; Secure' : ''}`
+    `ai_hub_admin=${encodeURIComponent(sid)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}${secure ? '; Secure' : ''}`
   );
   res.json({ ok: true, authenticated: true });
 });
@@ -241,7 +271,7 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '1.8.14',
+    version: '2.0.0',
     openaiCompatible: true,
     routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });

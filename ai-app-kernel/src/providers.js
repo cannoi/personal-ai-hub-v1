@@ -75,48 +75,18 @@ export function rankChatModels(list, preferred = null) {
 
   const score = (id) => {
     const n = String(id).toLowerCase();
-    let s = 0;
+    let s = 50; // baseline
 
-    // --- Gemini / Google ---
-    if (/3\.1.*flash.*lite/.test(n)) s += 100;
-    else if (/3\.1.*flash/.test(n)) s += 90;
-    else if (/3\.5.*flash/.test(n)) s += 85;
-    else if (/3.*flash/.test(n)) s += 80;
-    else if (/2\.5.*flash.*lite/.test(n)) s += 70;
-    else if (/2\.5.*flash/.test(n)) s += 65;
-    else if (/flash-lite/.test(n)) s += 60;
-    else if (/2\.0.*flash/.test(n)) s += 55;
-    else if (/flash-latest|gemini-flash/.test(n)) s += 52;
-    else if (/1\.5.*flash/.test(n)) s += 40;
-    else if (/flash/.test(n)) s += 35;
-
-    // --- OpenAI-family: mini / nano first ---
-    if (/\bnano\b/.test(n)) s += 48;
-    if (/\bmini\b/.test(n)) s += 45;
-    if (/gpt-4o-mini|gpt-4\.1-mini|gpt-3\.5/.test(n)) s += 42;
-
-    // --- Anthropic: haiku first ---
-    if (/haiku/.test(n)) s += 44;
-    if (/sonnet/.test(n)) s += 10;
-    if (/opus/.test(n)) s -= 20;
-
-    // --- DeepSeek: chat/flash before reasoner/pro ---
-    if (/deepseek.*flash/.test(n)) s += 50;
-    if (/deepseek-chat|deepseek-v3(?!.*pro)/.test(n)) s += 40;
-    if (/reasoner/.test(n)) s += 5;
-    if (/deepseek.*pro|v4-pro/.test(n)) s -= 15;
-
-    // --- Groq / Llama: smaller / instant first ---
-    if (/instant|8b|7b|3b|1b/.test(n)) s += 38;
-    if (/70b|405b/.test(n)) s += 8;
-
-    // --- OpenRouter free tags ---
-    if (/:free\b/.test(n) || /free\//.test(n)) s += 55;
-
-    // --- Generic cheap signals ---
-    if (/\bsmall\b|\btiny\b|\blite\b|\bfast\b/.test(n)) s += 28;
-    if (/\bchat\b|\binstruct\b/.test(n)) s += 15;
-    if (/gemma|llama|mistral|qwen|phi|gemma/.test(n)) s += 12;
+    // Quality-first ranking (v2 default = quality). Economy mode can invert later.
+    // Flagship / pro / opus / large models score highest.
+    if (/\bopus\b|gpt-4o(?!-mini)|gpt-4\.1(?!-mini)|o3(?!-mini)|o1(?!-mini)|claude-3-5-sonnet|claude-4|gemini-2\.5-pro|gemini-3.*pro|deepseek.*pro|70b|405b|\bpro\b/.test(n)) s += 80;
+    if (/\bsonnet\b|gpt-4o-mini|gpt-4\.1-mini|o3-mini|o1-mini|gemini-2\.5-flash(?!-lite)|deepseek-chat|deepseek-v3/.test(n)) s += 55;
+    if (/\bhaiku\b|flash-lite|nano|\btiny\b|\bsmall\b|instant|8b|7b|3b|1b|gpt-3\.5/.test(n)) s += 15;
+    if (/flash(?!-lite)/.test(n)) s += 40;
+    if (/:free\b|\/free/.test(n)) s += 10; // free is fine but not first in quality mode
+    if (/\breason|\br1\b|\bo3\b|\bo1\b/.test(n)) s += 25;
+    if (/\bchat\b|\binstruct\b/.test(n)) s += 8;
+    if (/gemma|llama|mistral|qwen|phi/.test(n)) s += 5;
 
     // --- Expensive / quota-heavy last ---
     if (/\bpro\b|pro-latest|-pro-/.test(n)) s -= 40;
@@ -258,32 +228,57 @@ export function adaptiveTimeoutMs(provider, opts = {}) {
 export function adaptiveNumPredict(messages = []) {
   const env = Number(process.env.OLLAMA_NUM_PREDICT || 0);
   if (env > 0) return env;
+  // v2: avoid aggressive truncation; prefer larger budgets
   const text = (Array.isArray(messages) ? messages : []).map(m => String(m?.content || '')).join(' ');
   const len = text.length;
-  if (len < 80) return 96;
-  if (len < 400) return 192;
-  if (len < 1200) return 320;
-  return 512;
+  if (len < 80) return 512;
+  if (len < 400) return 1024;
+  if (len < 2000) return 2048;
+  return 4096;
 }
 
 export async function chatProvider(provider, token, model, messages, fetchImpl = fetch, opts = {}) {
   if (provider.type === 'ollama') {
-    // Adaptive: simple questions finish faster; heavy local models still get room.
-    const timeoutMs = Number(opts.timeoutMs || process.env.OLLAMA_CHAT_TIMEOUT_MS || 120000);
-    const numPredict = Number(opts.numPredict || process.env.OLLAMA_NUM_PREDICT || 0) || adaptiveNumPredict(messages);
-    const numCtx = Number(process.env.OLLAMA_NUM_CTX || 2048);
+    const timeoutMs = Number(opts.timeoutMs || process.env.OLLAMA_CHAT_TIMEOUT_MS || 180000);
+    const numPredict = Number(opts.max_tokens || opts.numPredict || process.env.OLLAMA_NUM_PREDICT || 0) || adaptiveNumPredict(messages);
+    const numCtx = Number(process.env.AI_HUB_OLLAMA_NUM_CTX || process.env.OLLAMA_NUM_CTX || 8192);
+    const temperature = opts.temperature != null ? Number(opts.temperature) : 0.7;
     const base = String(provider.baseUrl || 'http://127.0.0.1:11434').replace(/\/$/, '');
     const r = await fetchImpl(`${base}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         model,
-        messages,
+        messages: messages.map(m => {
+          const out = { role: m.role === 'assistant' ? 'assistant' : (m.role === 'system' ? 'system' : 'user') };
+          if (typeof m.content === 'string') {
+            out.content = m.content;
+          } else if (Array.isArray(m.content)) {
+            const texts = [];
+            const images = [];
+            for (const part of m.content) {
+              if (typeof part === 'string') texts.push(part);
+              else if (part?.type === 'text') texts.push(part.text || '');
+              else if (part?.type === 'image_url') {
+                const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+                if (url && url.startsWith('data:')) {
+                  const b64 = url.split(',')[1];
+                  if (b64) images.push(b64);
+                }
+              }
+            }
+            out.content = texts.join('\n') || '';
+            if (images.length) out.images = images;
+          } else {
+            out.content = String(m.content || '');
+          }
+          return out;
+        }),
         stream: false,
         options: {
           num_predict: numPredict,
           num_ctx: numCtx,
-          temperature: 0.7
+          temperature
         }
       }),
       timeoutMs
@@ -295,28 +290,52 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
 
   if (provider.type === 'gemini') {
     const system = messages.find(m => m.role === 'system')?.content;
+    const toGeminiParts = (content) => {
+      if (typeof content === 'string') return [{ text: content }];
+      if (!Array.isArray(content)) return [{ text: String(content || '') }];
+      const parts = [];
+      for (const part of content) {
+        if (typeof part === 'string') { parts.push({ text: part }); continue; }
+        if (part?.type === 'text') { parts.push({ text: part.text || '' }); continue; }
+        if (part?.type === 'image_url') {
+          const url = typeof part.image_url === 'string' ? part.image_url : part.image_url?.url;
+          if (!url) continue;
+          if (url.startsWith('data:')) {
+            const m = url.match(/^data:([^;]+);base64,(.+)$/);
+            if (m) parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+            else parts.push({ text: '[image]' });
+          } else {
+            // Remote URL: Gemini official API prefers inline; pass as text hint if not fetchable here
+            parts.push({ text: `[image_url:${url.slice(0, 200)}]` });
+          }
+          continue;
+        }
+        parts.push({ text: String(part?.text || '') });
+      }
+      return parts.length ? parts : [{ text: '' }];
+    };
     const userParts = messages
       .filter(m => m.role !== 'system')
       .map(m => ({
         role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: m.content }]
+        parts: toGeminiParts(m.content)
       }));
-    const contents = system
-      ? [
-          { role: 'user', parts: [{ text: `System:\n${system}` }] },
-          { role: 'model', parts: [{ text: 'Understood.' }] },
-          ...userParts
-        ]
-      : userParts;
     const body = {
-      contents,
-      generationConfig: { temperature: 0.7, maxOutputTokens: 2048 }
+      contents: userParts,
+      generationConfig: {
+        temperature: opts.temperature != null ? Number(opts.temperature) : 0.7,
+        maxOutputTokens: Number(opts.max_tokens || opts.maxOutputTokens || 8192)
+      }
     };
+    if (system) body.systemInstruction = { parts: [{ text: system }] };
     const r = await fetchImpl(
-      `${provider.baseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(token)}`,
+      `${provider.baseUrl}/models/${encodeURIComponent(model)}:generateContent`,
       {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'x-goog-api-key': token
+        },
         body: JSON.stringify(body),
         timeoutMs: adaptiveTimeoutMs(provider, opts)
       }
@@ -344,11 +363,12 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
       },
       body: JSON.stringify({
         model,
-        max_tokens: 1024,
+        max_tokens: Number(opts.max_tokens || 4096),
+        temperature: opts.temperature != null ? Number(opts.temperature) : undefined,
         ...(system ? { system } : {}),
         messages: messages.filter(m => m.role !== 'system')
       }),
-      timeoutMs: 90000
+      timeoutMs: Number(opts.timeoutMs || 120000)
     });
     if (!r.ok) throw await providerError(r);
     const j = await r.json();
@@ -359,13 +379,25 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
     };
   }
 
+  const oaiBody = {
+    model,
+    messages,
+    temperature: opts.temperature != null ? Number(opts.temperature) : 0.7
+  };
+  if (opts.max_tokens != null) oaiBody.max_tokens = Number(opts.max_tokens);
+  if (opts.top_p != null) oaiBody.top_p = Number(opts.top_p);
+  if (opts.stop != null) oaiBody.stop = opts.stop;
+  if (opts.seed != null) oaiBody.seed = opts.seed;
+  if (opts.response_format) oaiBody.response_format = opts.response_format;
+  if (opts.tools) oaiBody.tools = opts.tools;
+  if (opts.tool_choice) oaiBody.tool_choice = opts.tool_choice;
   const r = await fetchImpl(`${provider.baseUrl}/chat/completions`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {})
     },
-    body: JSON.stringify({ model, messages, temperature: 0.2 }),
+    body: JSON.stringify(oaiBody),
     timeoutMs: adaptiveTimeoutMs(provider, opts)
   });
   if (!r.ok) throw await providerError(r);
@@ -375,6 +407,134 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
     model: j.model || model,
     usage: { prompt_tokens: Number(j.usage?.prompt_tokens || 0), completion_tokens: Number(j.usage?.completion_tokens || 0), total_tokens: Number(j.usage?.total_tokens || 0) },
     finishReason: j.choices?.[0]?.finish_reason || null
+  };
+}
+
+
+/**
+ * True SSE streaming for OpenAI-compatible providers.
+ * Yields { type:'delta'|'done'|'error', content?, finish_reason?, usage?, model?, error? }
+ * Caller must pass AbortSignal via opts.signal to cancel upstream when client disconnects.
+ */
+export async function* streamChatProvider(provider, token, model, messages, fetchImpl = fetch, opts = {}) {
+  const type = provider.type;
+  // Only OpenAI-compatible upstreams support reliable SSE today
+  if (type === 'openai-compatible' || type === 'openai' || type === 'deepseek' || type === 'groq' || type === 'openrouter' || type === 'mistral' || type === 'xai' || type === 'custom') {
+    const oaiBody = {
+      model,
+      messages,
+      stream: true,
+      temperature: opts.temperature != null ? Number(opts.temperature) : 0.7
+    };
+    if (opts.max_tokens != null) oaiBody.max_tokens = Number(opts.max_tokens);
+    if (opts.top_p != null) oaiBody.top_p = Number(opts.top_p);
+    if (opts.stop != null) oaiBody.stop = opts.stop;
+    if (opts.seed != null) oaiBody.seed = opts.seed;
+    if (opts.response_format) oaiBody.response_format = opts.response_format;
+    if (opts.tools) oaiBody.tools = opts.tools;
+    if (opts.tool_choice) oaiBody.tool_choice = opts.tool_choice;
+    if (opts.stream_options) oaiBody.stream_options = opts.stream_options;
+    else oaiBody.stream_options = { include_usage: true };
+
+    const controller = opts.signal ? null : new AbortController();
+    const signal = opts.signal || controller.signal;
+    const timeoutMs = Number(opts.timeoutMs || adaptiveTimeoutMs(provider, opts) || 300000);
+    const timer = setTimeout(() => { try { (opts.signal || controller)?.abort?.(); } catch {} }, timeoutMs);
+
+    let r;
+    try {
+      r = await fetchImpl(`${provider.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+          ...(token ? { Authorization: `Bearer ${token}` } : {})
+        },
+        body: JSON.stringify(oaiBody),
+        signal
+      });
+    } catch (err) {
+      clearTimeout(timer);
+      if (err?.name === 'AbortError') {
+        yield { type: 'error', error: 'UPSTREAM_ABORTED', status: 499 };
+        return;
+      }
+      throw err;
+    }
+    if (!r.ok) {
+      clearTimeout(timer);
+      throw await providerError(r);
+    }
+    const reader = r.body?.getReader?.();
+    if (!reader) {
+      clearTimeout(timer);
+      // Fallback: non-streaming body
+      const j = await r.json();
+      const content = extractOpenAICompatibleReply(j);
+      if (content) yield { type: 'delta', content, model: j.model || model };
+      yield {
+        type: 'done',
+        finish_reason: j.choices?.[0]?.finish_reason || 'stop',
+        usage: j.usage || null,
+        model: j.model || model
+      };
+      return;
+    }
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let lastModel = model;
+    let finish = 'stop';
+    let usage = null;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed || trimmed.startsWith(':')) continue; // keep-alive comments
+          if (!trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') {
+            yield { type: 'done', finish_reason: finish, usage, model: lastModel };
+            clearTimeout(timer);
+            return;
+          }
+          try {
+            const j = JSON.parse(data);
+            if (j.model) lastModel = j.model;
+            const choice = j.choices?.[0];
+            const delta = choice?.delta?.content;
+            if (delta) yield { type: 'delta', content: delta, model: lastModel };
+            if (choice?.finish_reason) finish = choice.finish_reason;
+            if (j.usage) usage = {
+              prompt_tokens: Number(j.usage.prompt_tokens || 0),
+              completion_tokens: Number(j.usage.completion_tokens || 0),
+              total_tokens: Number(j.usage.total_tokens || 0)
+            };
+          } catch {
+            // ignore malformed SSE lines
+          }
+        }
+      }
+      yield { type: 'done', finish_reason: finish, usage, model: lastModel };
+    } finally {
+      clearTimeout(timer);
+      try { reader.releaseLock?.(); } catch {}
+    }
+    return;
+  }
+
+  // Fallback for non-SSE providers: one-shot then emit as stream
+  const result = await chatProvider(provider, token, model, messages, fetchImpl, opts);
+  if (result.reply) yield { type: 'delta', content: result.reply, model: result.model || model };
+  yield {
+    type: 'done',
+    finish_reason: result.finishReason || 'stop',
+    usage: result.usage || null,
+    model: result.model || model
   };
 }
 

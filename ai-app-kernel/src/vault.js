@@ -17,7 +17,12 @@ export function createSecretVault(file, masterFile = './data/.ai-master-key') {
     try { cache = JSON.parse(await fs.readFile(file, 'utf8')); } catch { cache = {}; }
     return cache;
   }
-  async function save() { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, JSON.stringify(cache, null, 2), { mode: 0o600 }); }
+  async function save() {
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    const tmp = file + '.tmp.' + process.pid;
+    await fs.writeFile(tmp, JSON.stringify(cache, null, 2), { mode: 0o600 });
+    await fs.rename(tmp, file);
+  }
   async function keyMaterial() {
     const env = process.env.AI_HUB_MASTER_KEY;
     const raw = env || await ensureMaster(masterFile);

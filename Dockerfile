@@ -2,7 +2,7 @@
 # Avoids broken/empty ollama/ollama sidecar images on SoloHost (0-byte pulls).
 # No docker.sock. No host install. Models persist on /app/ollama-data volume.
 
-FROM node:18-bookworm-slim
+FROM node:22-bookworm-slim
 
 WORKDIR /app
 
@@ -20,7 +20,7 @@ RUN set -eux; \
     *) echo "WARN: unsupported arch $arch for Ollama — Local AI disabled"; exit 0 ;; \
   esac; \
   curl -fsSL -o /tmp/ollama.tgz \
-    "https://github.com/ollama/ollama/releases/download/v0.6.8/ollama-linux-${arch}.tgz"; \
+    "https://github.com/ollama/ollama/releases/download/v0.40.7/ollama-linux-${arch}.tgz"; \
   mkdir -p /tmp/ollama-extract; \
   tar -xzf /tmp/ollama.tgz -C /tmp/ollama-extract; \
   if [ -f /tmp/ollama-extract/bin/ollama ]; then \
