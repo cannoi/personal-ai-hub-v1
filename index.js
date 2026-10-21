@@ -82,7 +82,7 @@ const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-m
 const feedbackService = createFeedbackService({
   appId: 'personal-ai-hub',
   appName: 'Personal AI Hub',
-  version: '2.1.0'
+  version: '2.1.1'
 });
 mountFeedbackRoutes(app, feedbackService);
 
@@ -284,7 +284,7 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '2.1.0',
+    version: '2.1.1',
     openaiCompatible: true,
     routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });
@@ -296,7 +296,7 @@ app.get('/health', (_req, res) => {
     status: 'healthy',
     service: SERVICE_NAME,
     role: 'personal-ai-hub',
-    version: process.env.npm_package_version || '2.1.0',
+    version: process.env.npm_package_version || '2.1.1',
     timestamp: new Date().toISOString()
   });
 });
@@ -456,7 +456,7 @@ app.get('/api/v1/gateway', (req, res) => {
   res.json({
     service: SERVICE_NAME,
     role: 'solohost-ai-gateway',
-    version: process.env.npm_package_version || '2.1.0',
+    version: process.env.npm_package_version || '2.1.1',
     openaiCompatible: true,
     defaultModel: 'auto',
     /** Primary URL that worked for THIS request — copy into App Builder first */
@@ -629,12 +629,12 @@ if (String(process.env.ENABLE_MANAGED_OLLAMA || '0') === '1') {
   console.log('[hub] Managed Ollama off (ENABLE_MANAGED_OLLAMA!=1). Set OLLAMA_BASE_URL for external Local AI.');
 }
 
-const server = app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[hub] listening on 0.0.0.0:${PORT}`);
-  console.log(`[hub] health: GET /health`);
-  console.log(`[hub] service=${SERVICE_NAME} data=${DATA_DIR}`);
-});
-server.on('error', (err) => {
-  console.error('[hub] listen failed:', err);
-  process.exit(1);
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`Personal AI Hub listening on 0.0.0.0:${PORT}`);
+  console.log('OpenAI routes: GET /v1/models, POST /v1/chat/completions, POST /v1/responses, POST /v1/embeddings, GET /v1/health, GET /v1/__ping');
+  console.log(`Service DNS name: ${SERVICE_NAME}`);
+  console.log(`Gateway discovery: http://${SERVICE_NAME}:${PORT}/api/v1/gateway`);
+  if (PUBLIC_BASE_URL) console.log(`Public base URL: ${PUBLIC_BASE_URL}`);
+  console.log(`Data dir: ${DATA_DIR}`);
+  console.log('Other SoloHost apps must call the Hub via service name or host port — never 127.0.0.1 from another container.');
 });

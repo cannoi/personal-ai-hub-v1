@@ -4,7 +4,8 @@
  */
 import assert from 'node:assert/strict';
 import { rankChatModels, isChatCapableModel } from './ai-app-kernel/src/providers.js';
-import { assertSafeProviderUrl, isPrivateOrBlockedUrl, createRateLimiter } from './ai-app-kernel/src/security.js';
+import { assertSafeProviderUrl, assertSafeUrl, isPrivateOrBlockedUrl, createRateLimiter } from './ai-app-kernel/src/security.js';
+import { createLocalModelManager } from './ai-app-kernel/src/local.js';
 import { createMutexJsonStore } from './ai-app-kernel/src/mutex-store.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
@@ -40,7 +41,11 @@ function ok(name) { passed++; console.log('PASS', name); }
   } catch (e) {
     assert.equal(e.message, 'PROVIDER_URL_BLOCKED');
   }
-  ok('SSRF blocks private and metadata URLs');
+  assert.doesNotThrow(() => assertSafeUrl('http://127.0.0.1:11434'));
+  assert.throws(() => assertSafeUrl('http://169.254.169.254/latest/meta-data/'), /URL_BLOCKED/);
+  // Importing local.js must remain valid: this caught the production startup crash.
+  assert.equal(typeof createLocalModelManager, 'function');
+  ok('SSRF blocks private and metadata URLs; local Ollama loopback is explicitly supported');
 }
 
 // --- Rate limiter isolation + limit ---
@@ -106,8 +111,8 @@ function ok(name) { passed++; console.log('PASS', name); }
 // --- package version ---
 {
   const pkg = JSON.parse(await fs.readFile(new URL('./package.json', import.meta.url), 'utf8'));
-  assert.equal(pkg.version, '2.1.0');
-  ok('package version 2.1.0');
+  assert.equal(pkg.version, '2.1.1');
+  ok('package version 2.1.1');
 }
 
 // --- no master key in tree ---

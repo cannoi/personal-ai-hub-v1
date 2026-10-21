@@ -79,6 +79,19 @@ export function isPrivateOrBlockedUrl(raw, { allowLocalhost = false } = {}) {
   return false;
 }
 
+/**
+ * Validate a manually configured local-model endpoint.
+ * Loopback is allowed for Ollama running in this container; other private,
+ * link-local, metadata and non-HTTP(S) targets remain blocked.
+ */
+export function assertSafeUrl(url) {
+  if (isPrivateOrBlockedUrl(url, { allowLocalhost: true })) {
+    const e = new Error('URL_BLOCKED');
+    e.statusCode = 400;
+    throw e;
+  }
+}
+
 export function assertSafeProviderUrl(url) {
   if (isPrivateOrBlockedUrl(url, { allowLocalhost: false })) {
     const e = new Error('PROVIDER_URL_BLOCKED');

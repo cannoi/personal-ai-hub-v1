@@ -1,4 +1,4 @@
-# Personal AI Hub v2.0.0
+# Personal AI Hub v2.1.1
 
 Private **OpenAI-compatible AI Gateway** for SoloHost / Pi Network.
 
