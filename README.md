@@ -1,4 +1,4 @@
-# Personal AI Hub v2.1.2
+# Personal AI Hub v2.1.3
 
 Private **OpenAI-compatible AI Gateway** for SoloHost / Pi Network.
 
@@ -15,8 +15,9 @@ Lean international app: **English + Vietnamese**, suitable icons, chat in the us
 - **Real SSE streaming** for OpenAI-compatible providers.
 - **Vision**: `image_url` (data URLs) via OpenAI-compatible, Gemini, Ollama.
 - **Token scopes**: rate limits, allowed models/endpoints, expiry.
-- **i18n**: EN/VI with floating language toggle; Hub assistant replies in the user language.
-- **Onboarding**: 3-step wizard + inline SVG icons (no icon CDN).
+- **i18n**: EN/VI with a floating language toggle; the Hub assistant explicitly follows the latest user message language.
+- **AI quality**: model-family catalog, conservative auto-routing tiers, clearer uncertainty guidance, and longer cloud generation timeout.
+- **Icons**: SVG icon module is available; removal of all legacy CSS/icon CDN references remains pending.
 
 ## Security
 - Admin password required; `/v1` always requires `pah_` token.
@@ -39,4 +40,4 @@ Published CI images are **lean** (`WITH_OLLAMA=0`) so smoke tests pass and pulls
 
 ## Upgrade audit
 
-See [`UPGRADE_REPORT_v2.1.2.md`](./UPGRADE_REPORT_v2.1.2.md) for verified changes, tests, remaining gaps, and rollback notes.
+See [`UPGRADE_REPORT_v2.1.3.md`](./UPGRADE_REPORT_v2.1.3.md) for verified changes, tests, remaining gaps, and rollback notes.

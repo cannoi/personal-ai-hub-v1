@@ -2,9 +2,10 @@ import crypto from 'node:crypto';
 import { mountKernel } from './http.js';
 import { createSecretVault } from './vault.js';
 import { createActivityLogger } from './logger.js';
-import { providerCatalog, listModels, chatProvider, streamChatProvider, embedProvider, isChatCapableModel, rankChatModels, classifyProviderError, adaptiveTimeoutMs, adaptiveNumPredict } from './providers.js';
+import { providerCatalog, listModels, chatProvider, streamChatProvider, embedProvider, isChatCapableModel, rankChatModels, classifyProviderError, adaptiveTimeoutMs, adaptiveNumPredict, modelTier } from './providers.js';
 import { createLocalModelManager } from './local.js';
 import { createRateLimiter, assertSafeProviderUrl, isPrivateOrBlockedUrl } from './security.js';
+import { buildHubAssistantSystem } from './quality.js';
 
 export function createAiKernel(options = {}) {
   const knowledge = options.knowledge || null;
@@ -322,7 +323,8 @@ export function createAiKernel(options = {}) {
 
     async chat({ message, provider, model, system, appId, strictProvider = false, transparent = false, temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, messages = null, hasVision = false, allowFallback = true } = {}) {
       const requestId = crypto.randomUUID();
-      if (!message?.trim()) throw Object.assign(new Error('MESSAGE_REQUIRED'), { statusCode: 400 });
+      const hasMsgArr = Array.isArray(messages) && messages.length > 0;
+      if (!message?.trim() && !hasMsgArr) throw Object.assign(new Error('MESSAGE_REQUIRED'), { statusCode: 400 });
 
       const requestStartedAt = Date.now();
       // auto-vision is an alias: clear concrete model id, keep hasVision preference
@@ -397,11 +399,13 @@ export function createAiKernel(options = {}) {
         const appKnowledge = (typeof knowledge === 'string' && knowledge.trim())
           ? knowledge.trim()
           : '';
-        contextSystem = [
-          system || 'You are the Personal AI Hub assistant for this SoloHost AI Gateway. Guide the user using the app knowledge below. Be concise. Reply in the user language.',
-          appKnowledge ? `APP KNOWLEDGE (authoritative):\n${appKnowledge}` : '',
-          memories ? `Relevant recent private interaction memory:\n${memories}` : ''
-        ].filter(Boolean).join('\n\n');
+        contextSystem = buildHubAssistantSystem({
+          system,
+          messages: hasMsgArr ? messages : [{ role: 'user', content: message }],
+          uiLanguage: state.config?.language || state.config?.uiLanguage || 'en',
+          appKnowledge,
+          memories
+        });
       }
 
       
@@ -445,7 +449,7 @@ const failures = [];
         if (!modelOnKey) {
           candidates = rankModels(candidates, stickyOk ? preferred : null, k.id);
           // Soft sticky: healthy preferred first among auto candidates
-          if (stickyOk && preferred) {
+          if (stickyOk && preferred && candidates.length && modelTier(preferred) === modelTier(candidates[0])) {
             candidates = [preferred, ...candidates.filter(m => m !== preferred)];
           }
           // Vision preference: surface vision-capable models first when request has images
@@ -740,11 +744,13 @@ const failures = [];
           .map(x => `${x.role}: ${x.content}`)
           .join('\n');
         const appKnowledge = (typeof knowledge === 'string' && knowledge.trim()) ? knowledge.trim() : '';
-        contextSystem = [
-          system || 'You are the Personal AI Hub assistant for this SoloHost AI Gateway. Guide the user using the app knowledge below. Be concise. Reply in the user language.',
-          appKnowledge ? `APP KNOWLEDGE (authoritative):\n${appKnowledge}` : '',
-          memories ? `Relevant recent private interaction memory:\n${memories}` : ''
-        ].filter(Boolean).join('\n\n');
+        contextSystem = buildHubAssistantSystem({
+          system,
+          messages: hasMsgArr ? messages : [{ role: 'user', content: message }],
+          uiLanguage: state.config?.language || state.config?.uiLanguage || 'en',
+          appKnowledge,
+          memories
+        });
       }
 
       // Prefer full OpenAI-style messages (preserves history, tools, images)
@@ -766,6 +772,7 @@ const failures = [];
       }
       const chatOpts = { temperature, max_tokens, top_p, stop, seed, response_format, tools, tool_choice, signal };
 
+      const streamFailures = [];
       for (const k of eligible) {
         const p = providers[k.provider];
         if (!p) continue;
@@ -822,15 +829,18 @@ const failures = [];
             yield { type: 'error', error: 'CLIENT_ABORTED', statusCode: 499, message: 'Client disconnected', requestId };
             return;
           }
-          // try next key
+          streamFailures.push({ status: Number(err?.status || err?.statusCode || 0), message: String(err?.message || err), provider: k.provider, model: chosen });
+          // Retry another eligible key for the same request before returning a failure.
           continue;
         }
       }
+      const timedOut = streamFailures.some(x => x.status === 504 || /TIMEOUT|timed out|aborted/i.test(x.message));
       yield {
         type: 'error',
-        error: 'ALL_PROVIDERS_FAILED',
-        statusCode: 502,
-        message: 'All eligible AI routes failed for streaming.',
+        error: timedOut ? 'UPSTREAM_TIMEOUT' : 'ALL_PROVIDERS_FAILED',
+        code: timedOut ? 'upstream_timeout' : 'provider_overloaded',
+        statusCode: timedOut ? 504 : 502,
+        message: timedOut ? 'The AI provider took too long to respond. Try again or choose another model.' : 'All eligible AI routes failed for streaming.',
         requestId
       };
     },

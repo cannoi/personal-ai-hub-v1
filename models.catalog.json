@@ -1,29 +1,95 @@
 {
   "version": 1,
+  "description": "Conservative model-family tiers used for default ordering only. Provider discovery remains authoritative for availability.",
   "tiers": {
-    "flagship": { "score": 100, "description": "Highest quality" },
-    "standard": { "score": 70, "description": "Balanced quality/cost" },
-    "fast": { "score": 45, "description": "Low latency / cheaper" },
-    "tiny": { "score": 20, "description": "Smallest / free tier" }
+    "flagship": 100,
+    "standard": 70,
+    "fast": 45,
+    "tiny": 20
   },
-  "rules": [
-    { "match": "gpt-5(?!-mini|-nano)", "tier": "flagship", "context_window": 200000, "max_output": 16384, "vision": true, "tools": true, "reasoning": true },
-    { "match": "gpt-5-mini", "tier": "standard", "context_window": 128000, "max_output": 8192, "vision": true, "tools": true },
-    { "match": "gpt-4o(?!-mini)", "tier": "flagship", "context_window": 128000, "max_output": 16384, "vision": true, "tools": true },
-    { "match": "gpt-4o-mini|gpt-4\\.1-mini", "tier": "fast", "context_window": 128000, "max_output": 8192, "vision": true, "tools": true },
-    { "match": "o3(?!-mini)|o1(?!-mini)", "tier": "flagship", "context_window": 200000, "max_output": 100000, "tools": true, "reasoning": true },
-    { "match": "o3-mini|o1-mini", "tier": "standard", "context_window": 128000, "tools": true, "reasoning": true },
-    { "match": "claude.*opus", "tier": "flagship", "context_window": 200000, "tools": true, "vision": true },
-    { "match": "claude.*sonnet", "tier": "flagship", "context_window": 200000, "tools": true, "vision": true },
-    { "match": "claude.*haiku", "tier": "fast", "context_window": 200000, "tools": true },
-    { "match": "gemini.*pro", "tier": "flagship", "context_window": 1000000, "vision": true, "tools": true },
-    { "match": "gemini.*flash-lite", "tier": "tiny", "context_window": 1000000, "vision": true },
-    { "match": "gemini.*flash", "tier": "fast", "context_window": 1000000, "vision": true, "tools": true },
-    { "match": "deepseek.*reasoner|deepseek-r1", "tier": "flagship", "tools": true, "reasoning": true },
-    { "match": "deepseek", "tier": "standard", "tools": true },
-    { "match": "70b|405b", "tier": "flagship" },
-    { "match": "8b|7b|3b|1b|tiny|nano|instant", "tier": "tiny" },
-    { "match": "embed|whisper|tts|dall-e|imagen", "tier": "tiny", "embeddings": true }
+  "families": [
+    {
+      "tier": "flagship",
+      "patterns": [
+        "^gpt-5(?!-(?:mini|nano|chat))",
+        "^gpt-4\\.1(?!-mini)",
+        "^gpt-4o(?!-mini)",
+        "^o[134](?!-mini)",
+        "claude.*(?:opus|sonnet)",
+        "gemini.*(?:pro)",
+        "deepseek.*reason",
+        "(?:^|[-:])(?:70b|72b|405b)(?:[-:]|$)",
+        "mistral-large",
+        "grok-[4-9]"
+      ]
+    },
+    {
+      "tier": "standard",
+      "patterns": [
+        "^gpt-5(?:-chat)?$",
+        "^gpt-5-mini",
+        "^gpt-4\\.1-mini",
+        "^gpt-4o-mini",
+        "^o[134]-mini",
+        "claude.*sonnet",
+        "deepseek",
+        "gemini.*flash(?!.*lite)",
+        "grok-3",
+        "mistral-small",
+        "llama.*(?:70b|90b)"
+      ]
+    },
+    {
+      "tier": "fast",
+      "patterns": [
+        "gemini.*flash",
+        "claude.*haiku",
+        "\\bmini\\b",
+        "instant",
+        "mistral-small",
+        "grok.*mini",
+        "llama.*(?:8b|11b|13b)"
+      ]
+    },
+    {
+      "tier": "tiny",
+      "patterns": [
+        "flash-lite",
+        "nano",
+        "\\btiny\\b",
+        "(?:^|[-:])(?:1b|3b|7b|8b)(?:[-:]|$)",
+        "gpt-3\\.5",
+        "phi.*mini"
+      ]
+    }
   ],
-  "defaultTier": "standard"
+  "defaultUnknownTier": "standard",
+  "capabilityHints": {
+    "vision": [
+      "gpt-4o",
+      "gpt-4\\.1",
+      "gemini",
+      "claude-3",
+      "claude-sonnet",
+      "llava",
+      "qwen.*vl"
+    ],
+    "tools": [
+      "gpt-",
+      "claude",
+      "gemini",
+      "deepseek",
+      "mistral",
+      "qwen",
+      "llama"
+    ],
+    "embeddings": [
+      "embed",
+      "embedding",
+      "text-embedding",
+      "nomic-embed",
+      "bge-",
+      "e5-"
+    ]
+  }
 }

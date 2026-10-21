@@ -29,7 +29,7 @@ async function start(kernel) {
       runHandlers(route.handlers, fakeReq, fakeRes);
     });
   });
-  await new Promise(r => server.listen(0, '0.0.0.0', r)); return { server, port: server.address().port };
+  await new Promise(r => server.listen(0, '127.0.0.1', r)); return { server, port: server.address().port };
 }
 async function call(port, method, p, body, headers={}) {
   const r = await fetch(`http://127.0.0.1:${port}${p}`, { method, headers: { 'content-type':'application/json', ...headers }, body: body == null ? undefined : JSON.stringify(body) });

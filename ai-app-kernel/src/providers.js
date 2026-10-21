@@ -1,3 +1,4 @@
+import modelCatalog from '../../models.catalog.json' with { type: 'json' };
 export const PROVIDERS = {
   openai: {
     id: 'openai', name: 'OpenAI', type: 'openai-compatible',
@@ -63,30 +64,42 @@ export function isChatCapableModel(id) {
  * Rank models free-tier / cheap-first for ALL providers (Gemini strategy generalized).
  * Sticky preferred (last success) is injected by the kernel.
  */
+export function modelTier(modelId) {
+  const id = String(modelId || '').toLowerCase();
+  for (const family of modelCatalog.families) {
+    if ((family.patterns || []).some(pattern => {
+      try { return new RegExp(pattern, 'i').test(id); } catch { return false; }
+    })) return family.tier;
+  }
+  return modelCatalog.defaultUnknownTier || 'standard';
+}
+
+export function modelCapabilities(modelId) {
+  const id = String(modelId || '').toLowerCase();
+  const out = {};
+  for (const [capability, patterns] of Object.entries(modelCatalog.capabilityHints || {})) {
+    out[capability] = patterns.some(pattern => {
+      try { return new RegExp(pattern, 'i').test(id); } catch { return false; }
+    });
+  }
+  out.tier = modelTier(id);
+  return out;
+}
+
+/** Catalog-based ordering; provider discovery still decides whether a model is available. */
 export function rankChatModels(list, preferred = null) {
   const uniq = [];
   const seen = new Set();
   for (const id of list || []) {
-    const s = String(id || '');
+    const s = String(id || '').trim();
     if (!s || seen.has(s) || !isChatCapableModel(s)) continue;
     seen.add(s);
     uniq.push(s);
   }
-
-  const score = (id) => {
-    const n = String(id).toLowerCase();
-    // Absolute tier scores (catalog-aligned): flagship 100 > standard 70 > fast 45 > tiny 20
-    if (/gpt-5(?!-mini|-nano)|\bopus\b|gpt-4o(?!-mini)|gpt-4\.1(?!-mini)|o3(?!-mini)|o1(?!-mini)|claude.*sonnet|claude.*opus|gemini[\w.-]*pro|deepseek.*reason|70b|405b/.test(n)) return 100;
-    if (/gpt-5-mini|gpt-4o-mini|gpt-4\.1-mini|o3-mini|o1-mini|deepseek|\bsonnet\b|mistral-large|grok-3(?!-mini)/.test(n)) return 70;
-    if (/flash(?!-lite)|\bhaiku\b|\bmini\b|grok-3-mini|mistral-small|instant/.test(n)) return 45;
-    if (/flash-lite|nano|\btiny\b|8b|7b|3b|1b|gpt-3\.5/.test(n)) return 20;
-    return 70; // unknown → standard, never below tiny
-  };
-
-  uniq.sort((a, b) => score(b) - score(a) || a.localeCompare(b));
-  if (preferred && seen.has(preferred)) {
-    return [preferred, ...uniq.filter(x => x !== preferred)];
-  }
+  const scores = modelCatalog.tiers || { flagship: 100, standard: 70, fast: 45, tiny: 20 };
+  uniq.sort((a, b) => (scores[modelTier(b)] ?? scores.standard) - (scores[modelTier(a)] ?? scores.standard) || a.localeCompare(b));
+  // Sticky success may break ties inside a tier, but must never demote auto routing to a lower tier.
+  if (preferred && seen.has(preferred) && modelTier(preferred) === modelTier(uniq[0])) return [preferred, ...uniq.filter(x => x !== preferred)];
   return uniq;
 }
 
@@ -208,9 +221,9 @@ export function adaptiveTimeoutMs(provider, opts = {}) {
   if (opts.timeoutMs) return Number(opts.timeoutMs);
   const type = provider?.type || '';
   if (type === 'ollama') return Number(process.env.OLLAMA_CHAT_TIMEOUT_MS || 120000);
-  if (type === 'gemini') return Number(process.env.CLOUD_CHAT_TIMEOUT_MS || 25000);
-  if (type === 'anthropic') return Number(process.env.CLOUD_CHAT_TIMEOUT_MS || 30000);
-  return Number(process.env.CLOUD_CHAT_TIMEOUT_MS || 20000);
+  if (type === 'gemini') return Number(process.env.CLOUD_CHAT_TIMEOUT_MS || 120000);
+  if (type === 'anthropic') return Number(process.env.CLOUD_CHAT_TIMEOUT_MS || 120000);
+  return Number(process.env.CLOUD_CHAT_TIMEOUT_MS || 120000);
 }
 
 export function adaptiveNumPredict(messages = []) {
@@ -238,7 +251,9 @@ export async function chatProvider(provider, token, model, messages, fetchImpl =
       body: JSON.stringify({
         model,
         messages: messages.map(m => {
-          const out = { role: m.role === 'assistant' ? 'assistant' : (m.role === 'system' ? 'system' : 'user') };
+          const out = { role: ['system', 'user', 'assistant', 'tool'].includes(m.role) ? m.role : (m.role === 'developer' ? 'system' : 'user') };
+          if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+          if (Array.isArray(m.tool_calls)) out.tool_calls = m.tool_calls;
           if (typeof m.content === 'string') {
             out.content = m.content;
           } else if (Array.isArray(m.content)) {
@@ -458,8 +473,9 @@ export async function* streamChatProvider(provider, token, model, messages, fetc
       });
     } catch (err) {
       clearTimeout(timer);
-      if (err?.name === 'AbortError') {
-        yield { type: 'error', error: 'UPSTREAM_ABORTED', status: 499 };
+      if (err?.name === 'AbortError' || controller.signal.aborted) {
+        const timedOut = Boolean(timeoutSignal?.aborted && !opts.signal?.aborted);
+        yield { type: 'error', error: timedOut ? 'UPSTREAM_TIMEOUT' : 'UPSTREAM_ABORTED', status: timedOut ? 504 : 499 };
         return;
       }
       throw err;
@@ -526,8 +542,18 @@ export async function* streamChatProvider(provider, token, model, messages, fetc
         }
       }
       yield { type: 'done', finish_reason: finish, usage, model: lastModel };
+    } catch (err) {
+      const timedOut = Boolean(timeoutSignal?.aborted && !opts.signal?.aborted);
+      if (timedOut || (err?.name === 'AbortError' && !opts.signal?.aborted)) {
+        yield { type: 'error', error: 'UPSTREAM_TIMEOUT', status: 504 };
+      } else if (opts.signal?.aborted) {
+        yield { type: 'error', error: 'CLIENT_ABORTED', status: 499 };
+      } else {
+        throw err;
+      }
     } finally {
       clearTimeout(timer);
+      try { reader.cancel?.().catch?.(() => {}); } catch {}
       try { reader.releaseLock?.(); } catch {}
     }
     return;

@@ -188,9 +188,9 @@ async function addActiveKey(kernel, provider, models, selectedModel = null) {
   const kernel = await makeKernel(dir, fetchImpl);
   await kernel.chat({ message: 'a', provider: 'openai', appId: 'hub-ui' });
   await kernel.chat({ message: 'b', provider: 'openai', appId: 'hub-ui' });
-  assert.equal(modelsTried[0], 'gpt-4o-mini');
-  assert.equal(modelsTried[1], 'gpt-4o-mini');
-  console.log('PASS sticky selectedModel preferred');
+  assert.equal(modelsTried[0], 'gpt-4o');
+  assert.equal(modelsTried[1], 'gpt-4o');
+  console.log('PASS higher-tier model is not demoted by sticky lower-tier model');
   await fs.rm(dir, { recursive: true, force: true });
 }
 
