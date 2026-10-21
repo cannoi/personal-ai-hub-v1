@@ -1,4 +1,4 @@
-# Personal AI Hub v2.1.4
+# Personal AI Hub v2.1.5
 
 Private **OpenAI-compatible AI Gateway** for SoloHost / Pi Network.
 
@@ -39,4 +39,4 @@ If the Ollama release download fails during an enabled image build, the build no
 
 ## Upgrade audit
 
-See [`UPGRADE_REPORT_v2.1.4.md`](./UPGRADE_REPORT_v2.1.4.md) for verified changes, tests, remaining gaps, and rollback notes.
+See [`UPGRADE_REPORT_v2.1.5.md`](./UPGRADE_REPORT_v2.1.5.md) for verified changes, tests, remaining gaps, and rollback notes.
