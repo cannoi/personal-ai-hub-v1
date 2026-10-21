@@ -37,13 +37,14 @@ RUN set -eux; \
   /usr/local/bin/ollama --version
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev && npm cache clean --force
+RUN npm ci --omit=dev --no-audit --no-fund   && test -f node_modules/express/package.json   && node -e "import('express').then(m=>{if(!m.default)process.exit(1);console.log('express-ok')})"   && npm cache clean --force
 
 COPY . .
 RUN chmod +x /app/docker-entrypoint.sh \
   && mkdir -p /app/data /app/ollama-data \
   && test -f /app/index.js \
-  && test -d /app/node_modules/express \
+  && test -f /app/node_modules/express/package.json \
+  && node -e "import('express').then(()=>console.log('express-ok-after-copy'))" \
   && node --check /app/index.js
 
 ENV PORT=8080 \

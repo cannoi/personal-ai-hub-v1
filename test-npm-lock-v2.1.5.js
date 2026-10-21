@@ -17,3 +17,11 @@ test('npm overrides unavailable ms 2.1.4 with published 2.1.3', () => {
   assert.equal(nestedMs.resolved, 'https://registry.npmjs.org/ms/-/ms-2.1.3.tgz');
   assert.ok(!Object.values(lock.packages).some(x => x.resolved?.endsWith('/ms-2.1.4.tgz')));
 });
+
+test('mime-types resolves to a published 2.1.x version', () => {
+  const mt = lock.packages['node_modules/mime-types'];
+  assert.ok(mt, 'mime-types entry exists');
+  assert.notEqual(mt.version, '2.1.45');
+  assert.ok(mt.resolved.includes('mime-types-2.1.'));
+  assert.ok(!mt.resolved.includes('2.1.45'));
+});
