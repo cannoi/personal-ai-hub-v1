@@ -612,10 +612,14 @@ const runHealthCheck = async () => {
 setTimeout(runHealthCheck, 60_000);
 setInterval(runHealthCheck, HEALTH_INTERVAL_MS).unref();
 
-// Managed Local AI: start Ollama in background — never block API listen
-ensureOllama()
-  .then((ollamaBoot) => console.log('[hub] Ollama boot status:', JSON.stringify(ollamaBoot)))
-  .catch((err) => console.warn('[hub] ensureOllama failed:', err?.message || err));
+// Managed Local AI: only if explicitly enabled AND binary present — never block listen
+if (String(process.env.ENABLE_MANAGED_OLLAMA || '0') === '1') {
+  ensureOllama()
+    .then((ollamaBoot) => console.log('[hub] Ollama boot status:', JSON.stringify(ollamaBoot)))
+    .catch((err) => console.warn('[hub] ensureOllama failed:', err?.message || err));
+} else {
+  console.log('[hub] Managed Ollama off (ENABLE_MANAGED_OLLAMA!=1). Set OLLAMA_BASE_URL for external Local AI.');
+}
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Personal AI Hub listening on 0.0.0.0:${PORT}`);

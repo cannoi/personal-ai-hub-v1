@@ -24,3 +24,14 @@ Lean international app: **English + Vietnamese**, suitable icons, chat in the us
 - Feedback Hub credentials are server-side only.
 
 See [CHANGELOG.md](./CHANGELOG.md) for the full v2.0 list.
+
+## Local AI (Ollama)
+
+Published CI images are **lean** (`WITH_OLLAMA=0`) so smoke tests pass and pulls stay small.
+
+- **External Ollama**: set `OLLAMA_BASE_URL=http://host:11434` (or your Ollama service).
+- **Managed Ollama in the same image**: build with  
+  `docker build --build-arg WITH_OLLAMA=1 -t personal-ai-hub:local .`  
+  then run with `ENABLE_MANAGED_OLLAMA=1`.
+
+`GET /health` is always instant. Use `GET /health/deep` for Local AI status.

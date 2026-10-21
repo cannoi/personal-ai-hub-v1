@@ -2,6 +2,7 @@
 # Avoids broken/empty ollama/ollama sidecar images on SoloHost (0-byte pulls).
 # No docker.sock. No host install. Models persist on /app/ollama-data volume.
 
+# Default WITH_OLLAMA=0 keeps image lean for CI/smoke. Build with --build-arg WITH_OLLAMA=1 for managed Local AI.
 FROM node:22-bookworm-slim
 
 WORKDIR /app
@@ -14,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Assets are .tar.zst as of Ollama v0.40.x — must install lib tree or chat fails with
 # "llama-server binary not found".
 ARG TARGETARCH
-ARG WITH_OLLAMA=1
+ARG WITH_OLLAMA=0
 ARG OLLAMA_VERSION=v0.40.7
 RUN set -eux; \
   if [ "${WITH_OLLAMA}" = "0" ]; then echo "WITH_OLLAMA=0 — skip Ollama install"; exit 0; fi; \
