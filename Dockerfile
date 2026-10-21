@@ -10,8 +10,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl wget zstd \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Ollama CLI/server binary for the build architecture (amd64 / arm64)
-# Upstream assets are .tar.zst (not .tgz) as of Ollama v0.40.x
+# Install full Ollama package (binary + llama-server libs).
+# Assets are .tar.zst as of Ollama v0.40.x — must install lib tree or chat fails with
+# "llama-server binary not found".
 ARG TARGETARCH
 ARG OLLAMA_VERSION=v0.40.7
 RUN set -eux; \
@@ -27,21 +28,35 @@ RUN set -eux; \
     echo "WARN: Ollama download failed — Local AI disabled (cloud providers still work)"; \
     exit 0; \
   fi; \
-  mkdir -p /tmp/ollama-extract /usr/local/lib/ollama; \
+  mkdir -p /tmp/ollama-extract /usr/local/bin /usr/lib/ollama /usr/local/lib/ollama; \
   tar --use-compress-program=zstd -xf /tmp/ollama.tar.zst -C /tmp/ollama-extract; \
+  # Layout varies: ./bin/ollama + ./lib/ollama/*  OR nested dist paths
   if [ -f /tmp/ollama-extract/bin/ollama ]; then \
-    mv /tmp/ollama-extract/bin/ollama /usr/local/bin/ollama; \
+    install -m755 /tmp/ollama-extract/bin/ollama /usr/local/bin/ollama; \
   elif [ -f /tmp/ollama-extract/ollama ]; then \
-    mv /tmp/ollama-extract/ollama /usr/local/bin/ollama; \
+    install -m755 /tmp/ollama-extract/ollama /usr/local/bin/ollama; \
   else \
-    find /tmp/ollama-extract -type f -name ollama -exec mv {} /usr/local/bin/ollama \; ; \
+    find /tmp/ollama-extract -type f -name ollama -executable -exec install -m755 {} /usr/local/bin/ollama \; ; \
   fi; \
-  # Optional shared libs shipped alongside binary
-  if [ -d /tmp/ollama-extract/lib ]; then \
-    cp -a /tmp/ollama-extract/lib/. /usr/local/lib/ollama/ || true; \
+  # Install ALL companion libs (llama-server, runners, .so) where ollama searches
+  if [ -d /tmp/ollama-extract/lib/ollama ]; then \
+    cp -a /tmp/ollama-extract/lib/ollama/. /usr/lib/ollama/; \
+    cp -a /tmp/ollama-extract/lib/ollama/. /usr/local/lib/ollama/; \
+  elif [ -d /tmp/ollama-extract/lib ]; then \
+    cp -a /tmp/ollama-extract/lib/. /usr/lib/ollama/; \
+    cp -a /tmp/ollama-extract/lib/. /usr/local/lib/ollama/; \
   fi; \
+  # Also copy any loose llama-server found in the archive
+  find /tmp/ollama-extract -type f \( -name 'llama-server' -o -name 'ollama_llama_server' \) -exec cp -a {} /usr/local/lib/ollama/ \; || true; \
+  find /tmp/ollama-extract -type f \( -name 'llama-server' -o -name 'ollama_llama_server' \) -exec cp -a {} /usr/lib/ollama/ \; || true; \
   chmod +x /usr/local/bin/ollama 2>/dev/null || true; \
-  /usr/local/bin/ollama --version || echo "WARN: ollama binary not runnable at build time"; \
+  chmod +x /usr/local/lib/ollama/llama-server 2>/dev/null || true; \
+  chmod +x /usr/lib/ollama/llama-server 2>/dev/null || true; \
+  echo "=== ollama install layout ==="; \
+  ls -la /usr/local/bin/ollama || true; \
+  ls -la /usr/lib/ollama 2>/dev/null | head -20 || true; \
+  ls -la /usr/local/lib/ollama 2>/dev/null | head -20 || true; \
+  /usr/local/bin/ollama --version || echo "WARN: ollama --version failed at build time"; \
   rm -rf /tmp/ollama.tar.zst /tmp/ollama-extract
 
 COPY package*.json ./
@@ -59,14 +74,12 @@ ENV PORT=8080 \
     OLLAMA_MODELS=/app/ollama-data \
     OLLAMA_BASE_URL=http://127.0.0.1:11434 \
     OLLAMA_SERVICE= \
-    LD_LIBRARY_PATH=/usr/local/lib/ollama
+    LD_LIBRARY_PATH=/usr/lib/ollama:/usr/local/lib/ollama
 
 EXPOSE 8080
 
-# Longer start period: Ollama may need a minute on first boot / slow disks
-HEALTHCHECK --interval=30s --timeout=8s --start-period=60s --retries=5 \
+HEALTHCHECK --interval=30s --timeout=8s --start-period=90s --retries=5 \
   CMD wget -qO- http://127.0.0.1:8080/health || exit 1
 
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-# Fallback if platform strips ENTRYPOINT:
 CMD ["node", "index.js"]

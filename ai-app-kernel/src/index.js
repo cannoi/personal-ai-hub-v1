@@ -97,12 +97,25 @@ export function createAiKernel(options = {}) {
   }
 
   async function saveState() {
-    const { mkdir, writeFile, rename } = await import('node:fs/promises');
-    const { dirname, join } = await import('node:path');
+    const { mkdir, writeFile, rename, copyFile, unlink } = await import('node:fs/promises');
+    const { dirname } = await import('node:path');
+    const { randomBytes } = await import('node:crypto');
     await mkdir(dirname(stateFile), { recursive: true });
-    const tmp = stateFile + '.tmp.' + process.pid;
+    // Unique tmp per write avoids concurrent PID collisions (ENOENT on rename)
+    const tmp = stateFile + '.tmp.' + process.pid + '.' + randomBytes(4).toString('hex');
     await writeFile(tmp, JSON.stringify(state, null, 2), { mode: 0o600 });
-    await rename(tmp, stateFile);
+    try {
+      await rename(tmp, stateFile);
+    } catch (err) {
+      // Fallback for odd volume/filesystem behavior
+      try {
+        await copyFile(tmp, stateFile);
+        await unlink(tmp).catch(() => {});
+      } catch (err2) {
+        await unlink(tmp).catch(() => {});
+        throw err2;
+      }
+    }
   }
 
   const publicKey = k => ({

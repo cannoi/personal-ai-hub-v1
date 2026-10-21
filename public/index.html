@@ -46,16 +46,16 @@
   <div id="login-gate" class="hidden fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/95 backdrop-blur-sm p-4">
     <div class="w-full max-w-sm rounded-2xl border border-slate-700 bg-slate-900 p-6 shadow-2xl">
       <div class="text-center mb-5">
-        <div class="text-2xl font-bold tracking-tight">Personal AI Hub</div>
-        <p class="text-xs text-slate-400 mt-2">Admin access required</p>
+        <div class="text-2xl font-bold tracking-tight" data-i18n="title">Personal AI Hub</div>
+        <p class="text-xs text-slate-400 mt-2" data-i18n="loginTitle">Admin login</p>
       </div>
-      <label class="block text-[11px] uppercase text-slate-500 mb-1">Password</label>
+      <label class="block text-[11px] uppercase text-slate-500 mb-1" data-i18n="loginHint">Enter admin password</label>
       <input id="login-password" type="password" autocomplete="current-password"
         class="w-full rounded-xl bg-slate-800 border border-slate-700 px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
         placeholder="Admin password">
       <p id="login-error" class="text-rose-400 text-xs mt-2 hidden"></p>
       <button id="login-submit" type="button"
-        class="mt-4 w-full rounded-xl bg-indigo-600 hover:bg-indigo-500 py-2.5 text-sm font-semibold">Sign in</button>
+        class="mt-4 w-full rounded-xl bg-indigo-600 hover:bg-indigo-500 py-2.5 text-sm font-semibold" data-i18n="loginBtn">Sign in</button>
       <p class="text-[10px] text-slate-500 mt-4 text-center">SoloHost · AI_HUB_ADMIN_PASSWORD</p>
     </div>
   </div>
@@ -77,9 +77,9 @@
         </div>
       </div>
       <div class="flex items-center gap-1.5 sm:gap-2 shrink-0">
-        <button id="lang-btn" class="inline-flex items-center justify-center gap-1 h-9 px-2 sm:px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700" title="Language">
+        <button id="lang-btn" class="inline-flex items-center justify-center gap-1 h-9 px-2 sm:px-2.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-medium border border-slate-700" title="Language / Ngôn ngữ" aria-label="Switch language EN/VI">
           <i class="fa-solid fa-globe text-indigo-400"></i>
-          <span id="lang-text" class="hidden xs:inline sm:inline">EN</span>
+          <span id="lang-text" class="inline font-semibold tracking-wide">EN/VI</span>
         </button>
         <button id="hub-nav-btn" class="inline-flex items-center justify-center gap-1 h-9 px-2.5 sm:px-3 rounded-lg bg-indigo-600 text-white text-xs font-medium border border-indigo-500">
           <i class="fa-solid fa-house"></i><span class="hidden sm:inline">Hub</span>
@@ -403,6 +403,21 @@
         activeKeys: "Active Keys",
         notesList: "Your Notes",
         noNotes: "No notes yet. Ask AI to 'create a note'!",
+
+        hub: "Hub",
+        settings: "Settings",
+        chat: "Chat",
+        logout: "Logout",
+        loginTitle: "Admin login",
+        loginHint: "Enter admin password",
+        loginBtn: "Login",
+        gatewayTitle: "Gateway tokens",
+        localAi: "Local AI",
+        routing: "Routing",
+        activity: "Activity",
+        testRefresh: "Test / refresh",
+        modelsCount: "compatible model(s)",
+        language: "Language",
         askAboutNote: "Tell me more about this note: "
       },
       vi: {
@@ -429,27 +444,60 @@
         activeKeys: "Khóa đang hoạt động",
         notesList: "Ghi chú của bạn",
         noNotes: "Chưa có ghi chú nào. Hãy bảo AI 'tạo ghi chú'!",
+
+        hub: "Hub",
+        settings: "Cài đặt",
+        chat: "Chat",
+        logout: "Đăng xuất",
+        loginTitle: "Đăng nhập admin",
+        loginHint: "Nhập mật khẩu admin",
+        loginBtn: "Đăng nhập",
+        gatewayTitle: "Token cổng",
+        localAi: "AI cục bộ",
+        routing: "Định tuyến",
+        activity: "Nhật ký",
+        testRefresh: "Kiểm tra / làm mới",
+        modelsCount: "model tương thích",
+        language: "Ngôn ngữ",
         askAboutNote: "Hãy cho tôi biết thêm về ghi chú này: "
       }
     };
 
     let currentLang = localStorage.getItem('lang') || 'en';
 
-    function updateLanguage() {
+        function updateLanguage() {
+      const dict = i18n[currentLang] || i18n.en;
       document.querySelectorAll('[data-i18n]').forEach(el => {
         const key = el.getAttribute('data-i18n');
-        if (i18n[currentLang][key]) {
-          el.textContent = i18n[currentLang][key];
-        }
+        if (dict[key]) el.textContent = dict[key];
       });
       document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
         const key = el.getAttribute('data-i18n-placeholder');
-        if (i18n[currentLang][key]) {
-          el.setAttribute('placeholder', i18n[currentLang][key]);
-        }
+        if (dict[key]) el.setAttribute('placeholder', dict[key]);
       });
-      document.getElementById('lang-text').textContent = currentLang.toUpperCase();
+      document.querySelectorAll('[data-i18n-title]').forEach(el => {
+        const key = el.getAttribute('data-i18n-title');
+        if (dict[key]) el.setAttribute('title', dict[key]);
+      });
+      // Header nav buttons without data-i18n yet
+      const mapText = (sel, key) => {
+        const el = document.querySelector(sel);
+        if (!el || !dict[key]) return;
+        const span = el.querySelector('span.hidden, span.sm\\:inline, span');
+        // Prefer last span child (label)
+        const spans = el.querySelectorAll('span');
+        if (spans.length) spans[spans.length - 1].textContent = dict[key];
+      };
+      mapText('#hub-nav-btn', 'hub');
+      mapText('#settings-btn', 'settings');
+      mapText('#chat-nav-btn', 'chat');
+      mapText('#logout-btn', 'logout');
+      // Lang button shows active language in EN/VI form
+      const lt = document.getElementById('lang-text');
+      if (lt) lt.textContent = currentLang === 'vi' ? 'VI' : 'EN';
+      document.documentElement.lang = currentLang;
       localStorage.setItem('lang', currentLang);
+      try { localStorage.setItem('pah_lang', currentLang); } catch {}
     }
 
     // Toggle Language
@@ -457,6 +505,7 @@
       currentLang = currentLang === 'en' ? 'vi' : 'en';
       updateLanguage();
     });
+    updateLanguage(); // apply saved language on load
 
     // Mobile Sidebar Toggle
     const sidebar = document.getElementById('sidebar');
@@ -504,9 +553,9 @@
             </div>
             <span class="text-[10px] font-semibold ${statusClass}">${escapeHtml(key.status)}</span>
           </div>
-          <div class="mt-2 text-[10px] text-slate-500 truncate">${key.models?.length || 0} compatible model(s)${key.lastError ? ` · ${escapeHtml(key.lastError)}` : ''}</div>
+          <div class="mt-2 text-[10px] text-slate-500 truncate">${key.models?.length || 0} ${i18n[currentLang].modelsCount || "compatible model(s)"}${key.lastError ? ` · ${escapeHtml(key.lastError)}` : ''}</div>
           <div class="mt-2 flex gap-2">
-            <button data-sidebar-test="${escapeHtml(key.id)}" class="text-[10px] text-indigo-300 hover:text-white">Test / refresh</button>
+            <button data-sidebar-test="${escapeHtml(key.id)}" class="text-[10px] text-indigo-300 hover:text-white">${i18n[currentLang].testRefresh || "Test / refresh"}</button>
             <button data-sidebar-delete="${escapeHtml(key.id)}" class="text-[10px] text-rose-300 hover:text-rose-200">${i18n[currentLang].deleteBtn}</button>
           </div>`;
         container.appendChild(card);
