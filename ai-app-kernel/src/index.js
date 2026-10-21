@@ -798,9 +798,9 @@ const failures = [];
           let usage = null;
           let servedModel = chosen;
           for await (const ev of streamChatProvider(providerForKey, token, chosen, msgs, fetchImpl, chatOpts)) {
-            if (ev.type === 'delta' && ev.content) {
-              full += ev.content;
-              yield { type: 'delta', content: ev.content, model: ev.model || chosen };
+            if (ev.type === 'delta' && (ev.content || ev.tool_calls)) {
+              if (ev.content) full += ev.content;
+              yield { type: 'delta', ...(ev.content ? { content: ev.content } : {}), ...(ev.tool_calls ? { tool_calls: ev.tool_calls } : {}), model: ev.model || chosen };
             } else if (ev.type === 'done') {
               finish = ev.finish_reason || 'stop';
               usage = ev.usage || null;

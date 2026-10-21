@@ -1,4 +1,4 @@
-# Personal AI Hub v2.1.1
+# Personal AI Hub v2.1.2
 
 Private **OpenAI-compatible AI Gateway** for SoloHost / Pi Network.
 
@@ -35,3 +35,8 @@ Published CI images are **lean** (`WITH_OLLAMA=0`) so smoke tests pass and pulls
   then run with `ENABLE_MANAGED_OLLAMA=1`.
 
 `GET /health` is always instant. Use `GET /health/deep` for Local AI status.
+
+
+## Upgrade audit
+
+See [`UPGRADE_REPORT_v2.1.2.md`](./UPGRADE_REPORT_v2.1.2.md) for verified changes, tests, remaining gaps, and rollback notes.

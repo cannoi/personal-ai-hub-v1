@@ -42,7 +42,7 @@ function normalizeMessagesForUpstream(messages) {
       out.push({ role: 'tool', content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content || ''), tool_call_id: msg.tool_call_id });
       continue;
     }
-    const mappedRole = role === 'developer' ? 'system' : role;
+    const mappedRole = role; // Preserve OpenAI roles exactly; adapters may translate only when required.
     const content = msg?.content ?? msg?.text;
     if (Array.isArray(content)) {
       const parts = content.map(part => {
@@ -63,6 +63,16 @@ function normalizeMessagesForUpstream(messages) {
     if (msg.tool_calls) out[out.length - 1].tool_calls = msg.tool_calls;
   }
   return out;
+}
+
+function matchesScopePattern(value, pattern) {
+  const v = String(value || '');
+  const p = String(pattern || '');
+  if (!p) return false;
+  // Exact matching by default. A single * is an explicit wildcard; no substring matching.
+  if (!p.includes('*')) return v === p;
+  const escaped = p.split('*').map(part => part.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('.*');
+  return new RegExp(`^${escaped}$`).test(v);
 }
 
 function parseModel(model) {
@@ -202,7 +212,7 @@ function buildModelEntry({ id, owned_by, provider = null, localDetail = null, la
 export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub' }) {
   const clientFromReq = (req) => ({
     // Prefer Express req.ip when trust proxy is enabled; never trust raw XFF alone
-    ip: (req.ip || String(req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || null),
+    ip: (req.ip || req.socket?.remoteAddress || null),
     ua: String(req.headers['user-agent'] || '').slice(0, 180) || null
   });
 
@@ -296,10 +306,8 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
       if (Array.isArray(allowedEp) && allowedEp.length) {
         const path = String(req.path || req.url || '').split('?')[0];
         const norm = path.replace(/^\/openai/, '');
-        const okEp = allowedEp.some(ep => {
-          const e = String(ep);
-          return norm === e || norm.endsWith(e) || norm.includes(e);
-        });
+        const shortPath = norm.replace(/^\/v1\//, '');
+        const okEp = allowedEp.some(ep => matchesScopePattern(norm, String(ep)) || matchesScopePattern(shortPath, String(ep))); 
         if (!okEp) {
           try { lease.slot?.release?.(); } catch {}
           return res.status(403).json({
@@ -336,7 +344,7 @@ export function mountOpenAICompat(app, { kernel, serviceName = 'personal-ai-hub'
     if (!Array.isArray(allowed) || !allowed.length) return null;
     if (!modelId || modelId === 'auto' || modelId === 'auto-vision' || modelId === 'auto-fast' || modelId === 'auto-best') return null;
     const id = String(modelId);
-    const ok = allowed.some(m => id === m || id.endsWith('/' + m) || id.startsWith(m + '/') || id.includes(m));
+    const ok = allowed.some(m => matchesScopePattern(id, String(m)));
     if (ok) return null;
     return {
       status: 403,

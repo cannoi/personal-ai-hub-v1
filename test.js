@@ -55,7 +55,7 @@ async function start(kernel) {
       const fakeReq = {
         method, path: url.pathname, url: req.url, headers, body: json,
         query: Object.fromEntries(url.searchParams),
-        get(n) { return n.toLowerCase() === 'host' ? headers.host : headers[n.toLowerCase()]; }
+        get(n) { return n.toLowerCase() === 'host' ? headers.host : headers[n.toLowerCase()]; }, on() {}, off() {}, ip: '127.0.0.1'
       };
       const fakeRes = {
         statusCode: 200, headers: {},
@@ -77,9 +77,10 @@ async function start(kernel) {
   return { server, port: server.address().port };
 }
 
+let testToken = null;
 async function httpJson(port, method, p, body, headers = {}) {
   const r = await fetch(`http://127.0.0.1:${port}${p}`, {
-    method, headers: { 'Content-Type': 'application/json', ...headers },
+    method, headers: { 'Content-Type': 'application/json', ...(testToken ? { Authorization: `Bearer ${testToken}` } : {}), ...headers },
     body: body ? JSON.stringify(body) : undefined
   });
   const text = await r.text();
@@ -90,8 +91,12 @@ async function httpJson(port, method, p, body, headers = {}) {
 const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'paihub-'));
 const store = { async list() { return []; }, async put() {} };
 const actions = { async invoke() { return { ok: true }; }, list() { return []; } };
-const fetchImpl = async (url) => {
+const fetchImpl = async (url, init = {}) => {
   const u = String(url);
+  let requestBody = {}; try { requestBody = JSON.parse(init.body || '{}'); } catch {}
+  if (u.includes('/chat/completions') && requestBody.stream === true) {
+    return new Response('data: ' + JSON.stringify({ model: requestBody.model, choices: [{ delta: { content: 'stream-hello' }, finish_reason: null }] }) + '\n\n' + 'data: ' + JSON.stringify({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 } }) + '\n\n' + 'data: [DONE]\n\n', { status: 200, headers: { 'content-type': 'text/event-stream' } });
+  }
   if (u.includes('/api/tags')) return new Response(JSON.stringify({ models: [{ name: 'qwen2.5-coder:1.5b' }] }), { status: 200 });
   if (u.includes('/api/chat')) return new Response(JSON.stringify({ message: { content: 'local-hello' }, model: 'qwen2.5-coder:1.5b' }), { status: 200 });
   if (u.includes('/models')) return new Response(JSON.stringify({ data: [{ id: 'gpt-4o-mini' }] }), { status: 200 });
@@ -110,6 +115,8 @@ const kernel = createAiKernel({
 });
 await kernel.keys.addKey({ provider: 'local', token: '' });
 await kernel.keys.addKey({ provider: 'openai', token: 'sk-test-abcdefghijklmnop' });
+const tok = await kernel.gateway.createToken({ name: 'app-builder' });
+testToken = tok.token;
 
 const { server, port } = await start(kernel);
 
@@ -139,8 +146,7 @@ const stream = await httpJson(port, 'POST', '/v1/chat/completions', {
 });
 assert.equal(stream.status, 200); assert.match(stream.text, /data: \[DONE\]/);
 
-const tok = await kernel.gateway.createToken({ name: 'app-builder' });
-assert.equal((await httpJson(port, 'GET', '/v1/models')).status, 401);
+assert.equal((await httpJson(port, 'GET', '/v1/models', null, { Authorization: '' })).status, 401);
 assert.equal((await httpJson(port, 'GET', '/v1/models', null, { Authorization: 'Bearer pah_bad' })).status, 401);
 assert.equal((await httpJson(port, 'GET', '/v1/models', null, { Authorization: `Bearer ${tok.token}` })).status, 200);
 assert.equal((await httpJson(port, 'POST', '/v1/chat/completions', {

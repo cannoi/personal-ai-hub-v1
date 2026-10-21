@@ -1,12 +1,12 @@
 {
   "name": "personal-ai-hub",
-  "version": "2.1.1",
+  "version": "2.1.2",
   "type": "module",
-  "description": "Personal AI Hub \u2014 SoloHost AI Gateway v2.1 (transparent OpenAI-compatible)",
+  "description": "Personal AI Hub \u2014 SoloHost AI Gateway v2.1.2 (transparent OpenAI-compatible)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node test-v2-core.js && node test-v2.1-auth.js"
+    "test": "node test.js && node test-gateway-upgrade.js && node test-openai-contract.js && node test-smart-router.js && node test-security.js && node test-v2-core.js && node test-v2.1-auth.js"
   },
   "dependencies": {
     "express": "^4.19.2"

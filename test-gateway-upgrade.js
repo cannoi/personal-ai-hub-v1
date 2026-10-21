@@ -24,12 +24,12 @@ async function start(kernel) {
       let json = {}; try { if (body) json = JSON.parse(body); } catch {}
       const route = app._routes.find(r => r.method === req.method && r.path === url.pathname);
       if (!route) { res.statusCode = 404; return res.end(JSON.stringify({ error: 'NOT_FOUND' })); }
-      const fakeReq = { method: req.method, path: url.pathname, url: req.url, headers: req.headers, body: json, query: Object.fromEntries(url.searchParams), ip: '127.0.0.1', get(n) { return n.toLowerCase() === 'host' ? req.headers.host : req.headers[n.toLowerCase()]; } };
+      const fakeReq = { method: req.method, path: url.pathname, url: req.url, headers: req.headers, body: json, query: Object.fromEntries(url.searchParams), ip: '127.0.0.1', get(n) { return n.toLowerCase() === 'host' ? req.headers.host : req.headers[n.toLowerCase()]; }, on() {}, off() {}, ip: '127.0.0.1' };
       const fakeRes = { statusCode: 200, headers: {}, status(c) { this.statusCode = c; return this; }, setHeader(k,v){this.headers[k]=v;}, json(o){res.statusCode=this.statusCode; for(const[k,v]of Object.entries(this.headers))res.setHeader(k,v); res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(o));}, write(s){if(!this._chunks)this._chunks=[];this._chunks.push(String(s));}, end(s){res.statusCode=this.statusCode; for(const[k,v]of Object.entries(this.headers))res.setHeader(k,v); if(this._chunks?.length)res.end(this._chunks.join('')+(s||''));else res.end(s);} };
       runHandlers(route.handlers, fakeReq, fakeRes);
     });
   });
-  await new Promise(r => server.listen(0, '127.0.0.1', r)); return { server, port: server.address().port };
+  await new Promise(r => server.listen(0, '0.0.0.0', r)); return { server, port: server.address().port };
 }
 async function call(port, method, p, body, headers={}) {
   const r = await fetch(`http://127.0.0.1:${port}${p}`, { method, headers: { 'content-type':'application/json', ...headers }, body: body == null ? undefined : JSON.stringify(body) });
@@ -40,6 +40,10 @@ const store = { async list(){return[]}, async put(){} };
 const actions = { async invoke(){return{ok:true}}, list(){return[]} };
 const fetchImpl = async (url, init={}) => {
   const u=String(url);
+  let requestBody={}; try { requestBody=JSON.parse(init.body || '{}'); } catch {}
+  if (u.includes('/chat/completions') && requestBody.stream === true) {
+    return new Response('data: '+JSON.stringify({model:requestBody.model,choices:[{delta:{content:'stream-cloud'},finish_reason:null}]})+'\n\n'+'data: '+JSON.stringify({choices:[{delta:{tool_calls:[{index:0,id:'call_test',type:'function',function:{name:'lookup',arguments:'{}'}}]},finish_reason:null}]})+'\n\n'+'data: '+JSON.stringify({choices:[{delta:{},finish_reason:'tool_calls'}],usage:{prompt_tokens:2,completion_tokens:1,total_tokens:3}})+'\n\n'+'data: [DONE]\n\n',{status:200,headers:{'content-type':'text/event-stream'}});
+  }
   if(u.includes('/api/tags')) return new Response(JSON.stringify({models:[{name:'qwen2.5-coder:1.5b'}]}),{status:200});
   if(u.includes('/api/chat')) return new Response(JSON.stringify({message:{content:'local'},model:'qwen2.5-coder:1.5b',prompt_eval_count:5,eval_count:7}),{status:200});
   if(u.includes('/models')) return new Response(JSON.stringify({data:[{id:'gpt-test'}]}),{status:200});
@@ -60,13 +64,16 @@ assert.equal((await call(port,'GET','/v1/models',null,{Authorization:`Bearer ${t
 assert.equal((await call(port,'GET','/v1/models?api_key='+encodeURIComponent(tok.token))).status,401,'query API key must be rejected');
 const chat=await call(port,'POST','/v1/chat/completions',{model:'auto',messages:[{role:'user',content:'hi'}]},{Authorization:`Bearer ${tok.token}`,'X-SoloHost-App-ID':'builder'});
 assert.equal(chat.status,200,JSON.stringify(chat.json)); assert.ok(chat.json.usage.total_tokens > 0); assert.ok(chat.json.id); assert.ok(chat.json.personal_ai_hub.requestId);
-const stream=await call(port,'POST','/v1/chat/completions',{model:'auto',stream:true,messages:[{role:'user',content:'hi'}]},{Authorization:`Bearer ${tok.token}`,'X-SoloHost-App-ID':'builder'});
-assert.equal(stream.status,200); assert.match(stream.headers.get('content-type')||'',/text\/event-stream/); assert.match(stream.text,/data: \[DONE\]/);
+const stream=await call(port,'POST','/v1/chat/completions',{model:'openai/gpt-test',stream:true,messages:[{role:'user',content:'hi'}]},{Authorization:`Bearer ${tok.token}`,'X-SoloHost-App-ID':'builder'});
+assert.equal(stream.status,200); assert.match(stream.headers.get('content-type')||'',/text\/event-stream/); assert.match(stream.text,/data: \[DONE\]/); assert.match(stream.text,/tool_calls/, 'tool call deltas must be forwarded');
 const response=await call(port,'POST','/v1/responses',{model:'auto',input:'hello'},{Authorization:`Bearer ${tok.token}`,'X-SoloHost-App-ID':'builder'});
 assert.equal(response.status,200); assert.equal(response.json.object,'response'); assert.ok(response.json.output?.length);
 const emb=await call(port,'POST','/v1/embeddings',{model:'gpt-test',input:'hello'},{Authorization:`Bearer ${tok.token}`,'X-SoloHost-App-ID':'builder'});
 assert.equal(emb.status,200,JSON.stringify(emb.json)); assert.equal(emb.json.object,'list'); assert.deepEqual(emb.json.data[0].embedding,[0.1,0.2]);
 const usage=await kernel.gateway.usage({tokenId:tok.id}); assert.ok(usage.requests>=3); assert.ok(usage.totalTokens>=9);
 assert.ok((await call(port,'GET','/v1/health',null,{Authorization:`Bearer ${tok.token}`})).json.gateway);
+const scoped = await kernel.gateway.createToken({ name:'scope-regression', allowed_endpoints:['/v1/chat'] });
+const substringDenied = await call(port,'POST','/v1/chat/completions',{model:'auto',messages:[{role:'user',content:'hi'}]},{Authorization:`Bearer ${scoped.token}`,'X-SoloHost-App-ID':'scope-app'});
+assert.equal(substringDenied.status,403,'endpoint scope must not use substring matching');
 server.close();
 console.log('GATEWAY UPGRADE TESTS PASSED');

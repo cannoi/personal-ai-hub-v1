@@ -510,7 +510,10 @@ export async function* streamChatProvider(provider, token, model, messages, fetc
             if (j.model) lastModel = j.model;
             const choice = j.choices?.[0];
             const delta = choice?.delta?.content;
-            if (delta) yield { type: 'delta', content: delta, model: lastModel };
+            const toolCalls = choice?.delta?.tool_calls;
+            if (delta || (Array.isArray(toolCalls) && toolCalls.length)) {
+              yield { type: 'delta', ...(delta ? { content: delta } : {}), ...(toolCalls?.length ? { tool_calls: toolCalls } : {}), model: lastModel };
+            }
             if (choice?.finish_reason) finish = choice.finish_reason;
             if (j.usage) usage = {
               prompt_tokens: Number(j.usage.prompt_tokens || 0),
