@@ -282,23 +282,36 @@ app.get('/version', (_req, res) => {
   });
 });
 
-app.get('/health', async (_req, res) => {
+app.get('/health', (_req, res) => {
+  // Instant 200 — Docker/CI smoke tests only check reachability
+  res.status(200).json({
+    status: 'healthy',
+    service: SERVICE_NAME,
+    role: 'personal-ai-hub',
+    version: process.env.npm_package_version || '2.1.0',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/health/deep', async (_req, res) => {
   try {
     const h = await ai.health();
-    // Hub is healthy even when Ollama is down — cloud providers still work
     res.json({
       status: 'healthy',
       service: SERVICE_NAME,
       role: 'personal-ai-hub',
       timestamp: new Date().toISOString(),
       hub: h,
-      ollama: {
-        available: !!h.local,
-        models: h.localModels || 0
-      }
+      ollama: { available: !!h.local, models: h.localModels || 0 }
     });
-  } catch {
-    res.json({ status: 'healthy', service: SERVICE_NAME, timestamp: new Date().toISOString() });
+  } catch (err) {
+    res.status(200).json({
+      status: 'healthy',
+      service: SERVICE_NAME,
+      degraded: true,
+      error: String(err?.message || err).slice(0, 200),
+      timestamp: new Date().toISOString()
+    });
   }
 });
 

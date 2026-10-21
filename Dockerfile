@@ -14,8 +14,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Assets are .tar.zst as of Ollama v0.40.x — must install lib tree or chat fails with
 # "llama-server binary not found".
 ARG TARGETARCH
+ARG WITH_OLLAMA=1
 ARG OLLAMA_VERSION=v0.40.7
 RUN set -eux; \
+  if [ "${WITH_OLLAMA}" = "0" ]; then echo "WITH_OLLAMA=0 — skip Ollama install"; exit 0; fi; \
   arch="${TARGETARCH:-amd64}"; \
   case "$arch" in \
     amd64|x86_64) arch=amd64 ;; \
@@ -75,6 +77,7 @@ ENV PORT=8080 \
     OLLAMA_BASE_URL=http://127.0.0.1:11434 \
     OLLAMA_SERVICE= \
     AI_HUB_SKIP_OLLAMA_WAIT=1 \
+    ENABLE_MANAGED_OLLAMA=1 \
     LD_LIBRARY_PATH=/usr/lib/ollama:/usr/local/lib/ollama
 
 EXPOSE 8080
