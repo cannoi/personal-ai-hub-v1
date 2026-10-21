@@ -224,7 +224,7 @@ export function createLocalModelManager(provider, fetchImpl = fetch) {
           suggested: SUGGESTED_LOCAL_MODELS,
           hint: starting
             ? 'Managed Ollama is still starting inside the Hub container. Wait 1–2 minutes then Refresh.'
-            : 'Cannot reach managed Ollama at http://127.0.0.1:11434 inside the Hub container. Rebuild/redeploy so docker-entrypoint or start-ollama.js can run `ollama serve`. Cloud providers keep working.'
+            : 'Managed Ollama is not reachable at http://127.0.0.1:11434 inside the Hub container. Check the Hub startup logs and /health/deep; the image must include the Ollama runtime (WITH_OLLAMA=1) and managed startup must be enabled (ENABLE_MANAGED_OLLAMA=1). Cloud providers keep working.'
         };
       }
     },

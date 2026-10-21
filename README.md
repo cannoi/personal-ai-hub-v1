@@ -1,4 +1,4 @@
-# Personal AI Hub v2.1.3
+# Personal AI Hub v2.1.4
 
 Private **OpenAI-compatible AI Gateway** for SoloHost / Pi Network.
 
@@ -28,16 +28,15 @@ See [CHANGELOG.md](./CHANGELOG.md) for the full v2.0 list.
 
 ## Local AI (Ollama)
 
-Published CI images are **lean** (`WITH_OLLAMA=0`) so smoke tests pass and pulls stay small.
+The standard production image now includes the Ollama runtime and starts `ollama serve` automatically. The model itself is **not** downloaded automatically; choose a model in the Local AI panel to avoid unexpected disk, bandwidth, RAM, or CPU use. Model files persist in the `personal-ai-ollama-data` volume.
 
-- **External Ollama**: set `OLLAMA_BASE_URL=http://host:11434` (or your Ollama service).
-- **Managed Ollama in the same image**: build with  
-  `docker build --build-arg WITH_OLLAMA=1 -t personal-ai-hub:local .`  
-  then run with `ENABLE_MANAGED_OLLAMA=1`.
+- **Managed Local AI (default)**: the image builds with `WITH_OLLAMA=1`; runtime uses `ENABLE_MANAGED_OLLAMA=1`. Ollama listens on container loopback only and its port is not published.
+- **External Ollama**: set `ENABLE_MANAGED_OLLAMA=0` and `OLLAMA_BASE_URL=http://host:11434` (or your Ollama service).
+- **Intentionally cloud-only image**: build with `docker build --build-arg WITH_OLLAMA=0 -t personal-ai-hub:cloud-only .` and set `ENABLE_MANAGED_OLLAMA=0`.
 
-`GET /health` is always instant. Use `GET /health/deep` for Local AI status.
+If the Ollama release download fails during an enabled image build, the build now fails explicitly rather than publishing an image that silently lacks the Ollama binary. `GET /health` remains instant; use `GET /health/deep` for Local AI status. Startup logs report whether Ollama is ready or why it could not start.
 
 
 ## Upgrade audit
 
-See [`UPGRADE_REPORT_v2.1.3.md`](./UPGRADE_REPORT_v2.1.3.md) for verified changes, tests, remaining gaps, and rollback notes.
+See [`UPGRADE_REPORT_v2.1.4.md`](./UPGRADE_REPORT_v2.1.4.md) for verified changes, tests, remaining gaps, and rollback notes.

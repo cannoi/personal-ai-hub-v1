@@ -1,12 +1,12 @@
 {
   "name": "personal-ai-hub",
-  "version": "2.1.3",
+  "version": "2.1.4",
   "type": "module",
-  "description": "Personal AI Hub \u2014 SoloHost AI Gateway v2.1.3 (AI quality and reliability patch)",
+  "description": "Personal AI Hub \u2014 SoloHost AI Gateway v2.1.4 (managed Local AI startup and AI quality reliability patch)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "node test.js && node test-gateway-upgrade.js && node test-openai-contract.js && node test-smart-router.js && node test-security.js && node test-v2-core.js && node test-v2.1-auth.js && node test-ai-quality-v2.1.3.js"
+    "test": "node test.js && node test-gateway-upgrade.js && node test-openai-contract.js && node test-smart-router.js && node test-security.js && node test-v2-core.js && node test-v2.1-auth.js && node test-ai-quality-v2.1.3.js && node test-managed-ollama-v2.1.4.js"
   },
   "dependencies": {
     "express": "^4.19.2"

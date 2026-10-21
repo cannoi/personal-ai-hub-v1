@@ -82,7 +82,7 @@ const { createFeedbackService, mountFeedbackRoutes } = require('./lib/feedback-m
 const feedbackService = createFeedbackService({
   appId: 'personal-ai-hub',
   appName: 'Personal AI Hub',
-  version: '2.1.3'
+  version: '2.1.4'
 });
 mountFeedbackRoutes(app, feedbackService);
 
@@ -284,7 +284,7 @@ function buildConnectionHints(req) {
 app.get('/version', (_req, res) => {
   res.json({
     name: 'personal-ai-hub',
-    version: '2.1.3',
+    version: '2.1.4',
     openaiCompatible: true,
     routes: ['GET /v1/models', 'POST /v1/chat/completions', 'POST /v1/responses', 'POST /v1/embeddings', 'GET /v1/health', 'GET /v1/__ping']
   });
@@ -296,7 +296,7 @@ app.get('/health', (_req, res) => {
     status: 'healthy',
     service: SERVICE_NAME,
     role: 'personal-ai-hub',
-    version: process.env.npm_package_version || '2.1.3',
+    version: process.env.npm_package_version || '2.1.4',
     timestamp: new Date().toISOString()
   });
 });
@@ -456,7 +456,7 @@ app.get('/api/v1/gateway', (req, res) => {
   res.json({
     service: SERVICE_NAME,
     role: 'solohost-ai-gateway',
-    version: process.env.npm_package_version || '2.1.3',
+    version: process.env.npm_package_version || '2.1.4',
     openaiCompatible: true,
     defaultModel: 'auto',
     /** Primary URL that worked for THIS request — copy into App Builder first */
@@ -620,13 +620,13 @@ const runHealthCheck = async () => {
 setTimeout(runHealthCheck, 60_000);
 setInterval(runHealthCheck, HEALTH_INTERVAL_MS).unref();
 
-// Managed Local AI: only if explicitly enabled AND binary present — never block listen
-if (String(process.env.ENABLE_MANAGED_OLLAMA || '0') === '1') {
+// Managed Local AI: enabled by default in the production image; never block HTTP listen
+if (String(process.env.ENABLE_MANAGED_OLLAMA ?? '1') === '1') {
   ensureOllama()
     .then((ollamaBoot) => console.log('[hub] Ollama boot status:', JSON.stringify(ollamaBoot)))
     .catch((err) => console.warn('[hub] ensureOllama failed:', err?.message || err));
 } else {
-  console.log('[hub] Managed Ollama off (ENABLE_MANAGED_OLLAMA!=1). Set OLLAMA_BASE_URL for external Local AI.');
+  console.log('[hub] Managed Ollama intentionally disabled (ENABLE_MANAGED_OLLAMA=0). Set OLLAMA_BASE_URL for external Local AI.');
 }
 
 app.listen(PORT, '0.0.0.0', () => {

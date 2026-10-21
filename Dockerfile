@@ -1,30 +1,30 @@
-# Personal AI Hub — lean production image (CI/smoke-safe).
-# Managed Ollama is optional: build with --build-arg WITH_OLLAMA=1 when needed.
+# Personal AI Hub — production image with managed Local AI enabled by default.
+# Override WITH_OLLAMA=0 only for an intentionally cloud-only/lean build.
 FROM node:22-bookworm-slim
 
 WORKDIR /app
 
-# Minimal OS deps (no zstd/curl required when Ollama is skipped)
+# Base OS dependencies; curl/zstd are installed only for managed-Ollama builds
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Optional Ollama (off by default — keeps image small and smoke-stable)
+# Managed Ollama runtime (enabled by default for functional Local AI downloads)
 ARG TARGETARCH
-ARG WITH_OLLAMA=0
+ARG WITH_OLLAMA=1
 ARG OLLAMA_VERSION=v0.40.7
 RUN set -eux; \
   if [ "${WITH_OLLAMA}" != "1" ]; then \
-    echo "WITH_OLLAMA!=1 — skipping Ollama (image stays lean)"; \
+    echo "WITH_OLLAMA!=1 — intentionally skipping Ollama (cloud-only image)"; \
     exit 0; \
   fi; \
   apt-get update && apt-get install -y --no-install-recommends curl zstd \
     && rm -rf /var/lib/apt/lists/*; \
   arch="${TARGETARCH:-amd64}"; \
   case "$arch" in amd64|x86_64) arch=amd64 ;; arm64|aarch64) arch=arm64 ;; \
-    *) echo "unsupported arch $arch"; exit 0 ;; esac; \
+    *) echo "ERROR: unsupported architecture for managed Ollama: $arch (use amd64/arm64 or build with WITH_OLLAMA=0)"; exit 1 ;; esac; \
   url="https://github.com/ollama/ollama/releases/download/${OLLAMA_VERSION}/ollama-linux-${arch}.tar.zst"; \
-  curl -fsSL -o /tmp/ollama.tar.zst "$url" || { echo "Ollama download failed"; exit 0; }; \
+  curl --retry 3 --retry-delay 2 --retry-all-errors -fsSL -o /tmp/ollama.tar.zst "$url"; \
   mkdir -p /tmp/ox /usr/local/bin /usr/lib/ollama /usr/local/lib/ollama; \
   tar --use-compress-program=zstd -xf /tmp/ollama.tar.zst -C /tmp/ox; \
   if [ -f /tmp/ox/bin/ollama ]; then install -m755 /tmp/ox/bin/ollama /usr/local/bin/ollama; \
@@ -33,7 +33,8 @@ RUN set -eux; \
   if [ -d /tmp/ox/lib/ollama ]; then cp -a /tmp/ox/lib/ollama/. /usr/lib/ollama/; cp -a /tmp/ox/lib/ollama/. /usr/local/lib/ollama/; \
   elif [ -d /tmp/ox/lib ]; then cp -a /tmp/ox/lib/. /usr/lib/ollama/; cp -a /tmp/ox/lib/. /usr/local/lib/ollama/; fi; \
   rm -rf /tmp/ollama.tar.zst /tmp/ox; \
-  /usr/local/bin/ollama --version || true
+  test -x /usr/local/bin/ollama; \
+  /usr/local/bin/ollama --version
 
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
@@ -49,7 +50,7 @@ ENV PORT=8080 \
     SERVICE_NAME=personal-ai-hub \
     DATA_DIR=/app/data \
     NODE_ENV=production \
-    ENABLE_MANAGED_OLLAMA=0 \
+    ENABLE_MANAGED_OLLAMA=1 \
     OLLAMA_HOST=127.0.0.1:11434 \
     OLLAMA_MODELS=/app/ollama-data \
     OLLAMA_BASE_URL=http://127.0.0.1:11434 \
