@@ -1430,7 +1430,15 @@ const failures = [];
         else if (k.status === 'TEST_REQUIRED') bucket.testRequired++;
         else bucket.error++;
       }
-      const localInfo = await kernel.local.models();
+      // Health must stay fast for CI smoke tests — use cache; never wait long on Ollama
+      let localInfo = { available: false, models: [], status: 'unavailable' };
+      try {
+        const probe = Promise.resolve(kernel.local.models({ force: false }));
+        const timeout = new Promise((resolve) => setTimeout(() => resolve({ available: false, models: [], status: 'timeout', code: 'HEALTH_LOCAL_TIMEOUT' }), 1500));
+        localInfo = await Promise.race([probe, timeout]);
+      } catch {
+        localInfo = { available: false, models: [], status: 'unavailable' };
+      }
       return {
         ok: true,
         activeKeys: keys.filter(k => k.status === 'ACTIVE').length,

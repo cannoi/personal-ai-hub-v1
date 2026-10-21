@@ -74,6 +74,7 @@ ENV PORT=8080 \
     OLLAMA_MODELS=/app/ollama-data \
     OLLAMA_BASE_URL=http://127.0.0.1:11434 \
     OLLAMA_SERVICE= \
+    AI_HUB_SKIP_OLLAMA_WAIT=1 \
     LD_LIBRARY_PATH=/usr/lib/ollama:/usr/local/lib/ollama
 
 EXPOSE 8080
