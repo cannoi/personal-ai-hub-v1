@@ -22,6 +22,14 @@ const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || process.env.AI_HUB_PUBLI
 
 await mkdir(DATA_DIR, { recursive: true });
 
+
+process.on('uncaughtException', (err) => {
+  console.error('[hub] uncaughtException:', err?.stack || err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[hub] unhandledRejection:', err);
+});
+
 const app = express();
 app.set('trust proxy', process.env.AI_HUB_TRUST_PROXY || 'loopback,uniquelocal');
 
