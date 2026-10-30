@@ -1,0 +1,37 @@
+# Personal AI Hub — SoloHost install
+# OpenAI-compatible gateway: http://YOUR_IP:${HOST_PORT}/v1
+
+services:
+  personal-ai-hub:
+    image: ghcr.io/cannoi/personal-ai-hub-v1:latest
+    pull_policy: always
+    restart: unless-stopped
+    container_name: personal-ai-hub
+    hostname: personal-ai-hub
+    labels:
+      pi.ui.primary: "true"
+      pi.ai.gateway: "true"
+      pi.ai.openai_path: "/v1"
+    ports:
+      - "127.0.0.1:38927:8080"
+    environment:
+      AI_HUB_ADMIN_PASSWORD: "${AI_HUB_ADMIN_PASSWORD}"
+    volumes:
+      - personal-ai-hub-data:/app/data
+      - personal-ai-ollama-data:/app/ollama-data
+    networks:
+      default:
+        aliases:
+          - personal-ai-hub
+          - personal_ai_hub
+          - ai-hub
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 8s
+      retries: 5
+      start_period: 60s
+
+volumes:
+  personal-ai-hub-data:
+  personal-ai-ollama-data:

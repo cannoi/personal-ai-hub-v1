@@ -1,0 +1,12 @@
+title: "personal-ai-hub-v1"
+eyebrow: SoloHost App
+description: "A private, self-hosted hub for your personal AI tools. Easily manage your favorite models and workflows in one secure, accessible place. Designed for simplicity, it gives you full control over your data and AI experience"
+footer_hint: "Only enter secrets you need. Other values use safe app defaults."
+output_file: .env
+after_save: "Settings saved. Start the app from SoloHost."
+fields:
+  - name: AI_HUB_ADMIN_PASSWORD
+    label: Admin Password
+    type: password
+    preserve_if_blank: true
+    help: "Set the admin password for the Hub."
